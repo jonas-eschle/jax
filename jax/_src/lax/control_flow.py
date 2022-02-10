@@ -466,7 +466,7 @@ def _while_loop_batching_rule(axis_size, axis_name, main_type, args, dims,
   for x, old_axis, new_axis in zip(init, init_dims, carry_dims):
     if old_axis is batching.not_mapped and new_axis is not batching.not_mapped:
       new_init.append(batching.broadcast(x, axis_size, new_axis))
-    elif old_axis is batching.not_mapped and new_axis is batching.not_mapped:
+    elif old_axis is batching.not_mapped:
       new_init.append(x)
     else:
       assert new_axis is not batching.not_mapped
@@ -569,7 +569,7 @@ def _while_partial_eval(trace: pe.JaxprTrace, *tracers: pe.Tracer, cond_nconsts:
   cond_jaxpr_known, _, cond_uk = pe.partial_eval_jaxpr(  # type: ignore
       cond_jaxpr, cond_consts_uk + carry_uk, instantiate=False)
 
-  if cond_uk[0] or all([not uk for uk in unknowns]) or all(unknowns):
+  if cond_uk[0] or not any(unknowns) or all(unknowns):
     # If conditional is unknown, or all inputs are known, or all are unknown,
     # just do the default processing.
     return trace.default_process_primitive(while_p, tracers, params)
@@ -595,12 +595,10 @@ def _while_partial_eval(trace: pe.JaxprTrace, *tracers: pe.Tracer, cond_nconsts:
 
   # Run the whole while_loop to get all the outputs, then merge with known ones
   out_all: Sequence[pe.Tracer] = trace.default_process_primitive(while_p, tracers, params)
-  out_tracers: Sequence[pe.Tracer] = [
+  return [
     out_unknown if uk
     else pe.JaxprTracer(trace, pe.PartialVal.known(known), out_unknown.recipe)
     for uk, out_unknown, known in zip(carry_uk, out_all, out_known)]
-
-  return out_tracers
 
 def _while_transpose_error(*_, **kwargs):
   raise ValueError("Reverse-mode differentiation does not work for "

@@ -104,10 +104,7 @@ def xla_primitive_callable(prim, *arg_specs: ArgSpec, **params):
   device = _device_from_arg_devices(arg_devices)
   def prim_fun(*args):
     out = prim.bind(*args, **params)
-    if prim.multiple_results:
-      return out
-    else:
-      return out,
+    return out if prim.multiple_results else (out, )
   compiled = _xla_callable_uncached(lu.wrap_init(prim_fun), device, None,
                                     prim.name, donated_invars, *arg_specs)
   if not prim.multiple_results:
@@ -290,10 +287,7 @@ def jaxpr_has_pmap(jaxpr):
   for eqn in jaxpr.eqns:
     if 'xla_pmap' in eqn.primitive.name:
       return True
-  for subjaxpr in core.subjaxprs(jaxpr):
-    if jaxpr_has_pmap(subjaxpr):
-      return True
-  return False
+  return any(jaxpr_has_pmap(subjaxpr) for subjaxpr in core.subjaxprs(jaxpr))
 
 def _prune_unused_inputs(
     jaxpr: core.Jaxpr) -> Tuple[core.Jaxpr, Set[int], Set[int]]:
@@ -316,10 +310,7 @@ def _prune_unused_inputs(
 # remove it once we bring the id_tap implementation into the core.
 outfeed_rewriter: Optional[Callable[[core.Jaxpr], core.Jaxpr]] = None
 def apply_outfeed_rewriter(jaxpr: core.Jaxpr) -> core.Jaxpr:
-  if outfeed_rewriter is not None:
-    return outfeed_rewriter(jaxpr)
-  else:
-    return jaxpr
+  return outfeed_rewriter(jaxpr) if outfeed_rewriter is not None else jaxpr
 
 
 def jaxpr_replicas(jaxpr) -> int:
@@ -335,8 +326,7 @@ def jaxpr_replicas(jaxpr) -> int:
 # TODO(mattjj): this function assumes that only pmap has a parameter named
 # axis_size, and that it corresponds to cross-replica mapping
 def eqn_replicas(eqn):
-  call_jaxpr = eqn.params.get("call_jaxpr")
-  if call_jaxpr:
+  if call_jaxpr := eqn.params.get("call_jaxpr"):
     return eqn.params.get('axis_size', 1) * jaxpr_replicas(call_jaxpr)
   elif eqn.primitive in xla._initial_style_primitives:
     return initial_style_primitive_replicas(eqn.params)
@@ -352,16 +342,16 @@ def _xla_callable_device(nreps, backend, device, arg_devices):
     if device is not None or backend is not None:
       raise ValueError(f"can't specify device or backend for jit-of-pmap, "
                        f"got device={device} and backend={backend}")
-    return None
-  else:
-    if device is None and backend is None:
-      return _device_from_arg_devices(arg_devices)
-    elif device is not None and backend is None:
-      return device
-    elif device is None and backend is not None:
-      return xb.get_backend(backend).get_default_device_assignment(1)[0]
     else:
-      assert False  # Unreachable given the error check in _xla_callable
+      return None
+  elif device is None and backend is None:
+    return _device_from_arg_devices(arg_devices)
+  elif device is not None and backend is None:
+    return device
+  elif device is None:
+    return xb.get_backend(backend).get_default_device_assignment(1)[0]
+  else:
+    assert False  # Unreachable given the error check in _xla_callable
 
 
 # Argument and result handlers
@@ -409,10 +399,10 @@ def array_result_handler(sticky_device: Optional[Device],
                  sticky_device)
 
 
-result_handlers: Dict[
-    Type[core.AbstractValue],
-    Callable[[Optional[Device], Any], ResultHandler]] = {}
-result_handlers[core.AbstractUnit] = lambda _, __: lambda _: core.unit
+result_handlers: Dict[Type[core.AbstractValue],
+                      Callable[[Optional[Device], Any], ResultHandler]] = {
+                          core.AbstractUnit: lambda _, __: lambda _: core.unit
+                      }
 result_handlers[core.AbstractToken] = lambda _, __: lambda _: core.token
 result_handlers[core.ShapedArray] = array_result_handler
 result_handlers[core.ConcreteArray] = array_result_handler
@@ -620,7 +610,7 @@ class XlaCompiledComputation:
     return XlaCompiledComputation(compiled, in_avals, kept_var_idx, unsafe_call)
 
   def is_trivial(self):
-    return self._xla_executable == None
+    return self._xla_executable is None
 
   def xla_executable(self):
     if self.is_trivial():

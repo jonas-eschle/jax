@@ -193,7 +193,7 @@ def ann_recall(result_neighbors: Array, ground_truth_neighbors: Array) -> float:
   assert result_neighbors.shape[0] == ground_truth_neighbors.shape[0]
   gt_sets = [set(np.asarray(x)) for x in ground_truth_neighbors]
   hits = sum(
-      len(list(x for x in nn_per_q if x.item() in gt_sets[q]))
+      len([x for x in nn_per_q if x.item() in gt_sets[q]])
       for q, nn_per_q in enumerate(result_neighbors))
   return hits / ground_truth_neighbors.size
 
@@ -231,10 +231,7 @@ def _comparator_builder(operand, op_type, is_max_k):
   p1 = xla.parameter(c, 1, xc.Shape.scalar_shape(op_type))
   xla.parameter(c, 2, xc.Shape.scalar_shape(np.dtype(np.int32)))
   xla.parameter(c, 3, xc.Shape.scalar_shape(np.dtype(np.int32)))
-  if is_max_k:
-    cmp_result = xc.ops.Gt(p0, p1)
-  else:
-    cmp_result = xc.ops.Lt(p0, p1)
+  cmp_result = xc.ops.Gt(p0, p1) if is_max_k else xc.ops.Lt(p0, p1)
   return c.build(cmp_result)
 
 
@@ -256,11 +253,10 @@ def _approx_top_k_tpu_translation(ctx, avals_in, avals_out, operand, *, k,
       init_literal = np.array(np.NINF, dtype=op_type)
     else:
       init_literal = np.iinfo(op_type).min()
+  elif dtypes.issubdtype(op_type, np.floating):
+    init_literal = np.array(np.Inf, dtype=op_type)
   else:
-    if dtypes.issubdtype(op_type, np.floating):
-      init_literal = np.array(np.Inf, dtype=op_type)
-    else:
-      init_literal = np.iinfo(op_type).max()
+    init_literal = np.iinfo(op_type).max()
   iota = xc.ops.Iota(c, xc.Shape.array_shape(np.dtype(np.int32), op_dims),
                      reduction_dimension)
   init_val = xc.ops.Constant(c, init_literal)

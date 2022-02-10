@@ -352,9 +352,7 @@ def all_to_all(x, axis_name, split_axis, concat_axis, *, axis_index_groups=None,
       if split_axis < concat_axis:
         concat_axis += 1  # concat_axis gives a position _after_ split_axis is removed
         x = lax.expand_dims(x, (concat_axis,))  # insert the new axis
-      elif split_axis == concat_axis:
-        pass
-      else:  # concat_axis < split_axis
+      elif split_axis != concat_axis:  # concat_axis < split_axis
         x = lax.expand_dims(x, (concat_axis,))  # insert the new axis
         split_axis += 1   # we have a new axis before split_axis now
     result = all_to_all_p.bind(x, split_axis=split_axis, concat_axis=concat_axis,
@@ -436,14 +434,16 @@ def xeinsum(spec: str, x, y):
   # if a subscript appears in both inputs and not the outputs, contract!
   subs_contract = all_subs - set(out_subs)
 
-  lhs_reduce_axes = [lhs_subs.index(n) for n in lhs_uniques & subs_contract]
-  if lhs_reduce_axes:
+  if lhs_reduce_axes := [
+      lhs_subs.index(n) for n in lhs_uniques & subs_contract
+  ]:
     x = lax._reduce_sum(x, lhs_reduce_axes)
     for i in sorted(lhs_reduce_axes, reverse=True):
       del lhs_subs[i]
 
-  rhs_reduce_axes = [rhs_subs.index(n) for n in rhs_uniques & subs_contract]
-  if rhs_reduce_axes:
+  if rhs_reduce_axes := [
+      rhs_subs.index(n) for n in rhs_uniques & subs_contract
+  ]:
     y = lax._reduce_sum(y, rhs_reduce_axes)
     for i in sorted(rhs_reduce_axes, reverse=True):
       del rhs_subs[i]
@@ -479,12 +479,11 @@ class XeinsumSpecParser:
     return self.spec[self.pos]
 
   def parse_subscript(self):
-    if self.cur in string.ascii_lowercase:
-      out = self.cur
-      self.pos += 1
-      return out, True
-    else:
+    if self.cur not in string.ascii_lowercase:
       return None, False
+    out = self.cur
+    self.pos += 1
+    return out, True
 
   def parse_axis_name(self):
     try:
@@ -520,18 +519,17 @@ class XeinsumSpecParser:
       return False, (subscripts, names)
     if self.maybe_take(','):
       return True, (subscripts, names)
-    else:
-      assert self.maybe_take('{')
-      first = True
-      while not self.maybe_take('}'):
-        if not first:
-          assert self.maybe_take(',')
-        first = False
-        if self.eof:
-          raise ValueError("Unterminated named axis brace")
-        axis_name = self.parse_axis_name()
-        names.append(axis_name)
-      return self.maybe_take(',', False), (subscripts, names)
+    assert self.maybe_take('{')
+    first = True
+    while not self.maybe_take('}'):
+      if not first:
+        assert self.maybe_take(',')
+      first = False
+      if self.eof:
+        raise ValueError("Unterminated named axis brace")
+      axis_name = self.parse_axis_name()
+      names.append(axis_name)
+    return self.maybe_take(',', False), (subscripts, names)
 
   def parse_args(self):
     arg_specs = []
@@ -644,13 +642,12 @@ def _allreduce_abstract_eval(*args, axes, axis_index_groups):
   pos_axes = tuple(axis for axis in axes if isinstance(axis, int))
   named_shapes = [arg.named_shape for arg in args]
   if axis_index_groups is None:
-    named_axes = set(axis for axis in axes if not isinstance(axis, int))
+    named_axes = {axis for axis in axes if not isinstance(axis, int)}
     named_shapes = [{name: size for name, size in arg.named_shape.items()
                      if name not in named_axes} for arg in args]
-  else:
-    if len(pos_axes) != 0:
-      raise ValueError(f"axis_index_groups can only be used with reductions over "
-                       f"named axes, but got: {axes}")
+  elif pos_axes:
+    raise ValueError(f"axis_index_groups can only be used with reductions over "
+                     f"named axes, but got: {axes}")
   return [ShapedArray(lax._reduce_op_shape_rule(raise_to_shaped(arg), axes=pos_axes),
                       arg.dtype, named_shape=named_shape)
           for arg, named_shape in zip(args, named_shapes)]
@@ -779,7 +776,7 @@ def _ppermute_translation_rule(ctx, avals_in, avals_out, x, *, axis_name, perm):
   replica_groups = _replica_groups(ctx.axis_env, axis_name, None)
   group_size = len(replica_groups[0])
   srcs, dsts = unzip2((src % group_size, dst % group_size) for src, dst in perm)
-  if not (len(srcs) == len(set(srcs)) and len(dsts) == len(set(dsts))):
+  if len(srcs) != len(set(srcs)) or len(dsts) != len(set(dsts)):
     msg = "ppermute sources and destinations must be unique, got {}."
     raise ValueError(msg.format(perm))
 
@@ -871,7 +868,7 @@ def _all_to_all_translation_rule(ctx, avals_in, avals_out, x, *, split_axis,
   elif (ctx.platform == "tpu") or ((ctx.platform == "gpu") and (split_axis == 0) and
                                (concat_axis == 0)):
     split_count = len(replica_groups[0])
-    if not all(split_count == len(g) for g in replica_groups):
+    if any(split_count != len(g) for g in replica_groups):
       raise ValueError('Replica groups must be equally sized')
     replica_groups_protos = xc.make_replica_groups(replica_groups)
     return [xops.AllToAll(x, split_axis, concat_axis, split_count,
@@ -1207,23 +1204,7 @@ def _reduce_scatter_translation_rule(prim, reducer, ctx, avals_in, avals_out, x,
                                      *, scatter_dimension, axis_name,
                                      axis_index_groups, axis_size, tiled):
   c = ctx.builder
-  if ctx.platform in ("tpu", "gpu"):
-    scalar = ShapedArray((), c.get_shape(x).numpy_dtype())
-    computation = xla.primitive_subcomputation(
-        ctx.platform, ctx.axis_env, prim, scalar, scalar)
-    replica_groups = _replica_groups(ctx.axis_env, axis_name, axis_index_groups)
-    x = xops.ReduceScatter(
-        x,
-        computation,
-        scatter_dimension=scatter_dimension,
-        shard_count=axis_size,
-        replica_groups=xc.make_replica_groups(replica_groups))
-    if not tiled:
-      new_shape = list(c.get_shape(x).dimensions())
-      del new_shape[scatter_dimension]
-      x = xops.Reshape(x, new_shape)
-    return [x]
-  else:
+  if ctx.platform not in ("tpu", "gpu"):
     return xla.lower_fun(
         _reduce_scatter_via_reducer, multiple_results=False, new_style=True)(
             ctx, avals_in, avals_out, x,
@@ -1233,6 +1214,21 @@ def _reduce_scatter_translation_rule(prim, reducer, ctx, avals_in, avals_out, x,
             axis_index_groups=axis_index_groups,
             axis_size=axis_size,
             tiled=tiled)
+  scalar = ShapedArray((), c.get_shape(x).numpy_dtype())
+  computation = xla.primitive_subcomputation(
+      ctx.platform, ctx.axis_env, prim, scalar, scalar)
+  replica_groups = _replica_groups(ctx.axis_env, axis_name, axis_index_groups)
+  x = xops.ReduceScatter(
+      x,
+      computation,
+      scatter_dimension=scatter_dimension,
+      shard_count=axis_size,
+      replica_groups=xc.make_replica_groups(replica_groups))
+  if not tiled:
+    new_shape = list(c.get_shape(x).dimensions())
+    del new_shape[scatter_dimension]
+    x = xops.Reshape(x, new_shape)
+  return [x]
 
 
 def _reduce_scatter_abstract_eval(x, *, axis_name, scatter_dimension,
@@ -1248,11 +1244,11 @@ def _reduce_scatter_abstract_eval(x, *, axis_name, scatter_dimension,
                        f"{scatter_dim_input_size} must be divisible by "
                        f"shard_count {axis_size}")
     new_shape[scatter_dimension] = scatter_dim_input_size // axis_size
+  elif scatter_dim_input_size != axis_size:
+    raise ValueError(f"reduce_scatter operand scatter dimension size "
+                     f"{scatter_dim_input_size} must match shard count "
+                     f"{axis_size}")
   else:
-    if scatter_dim_input_size != axis_size:
-      raise ValueError(f"reduce_scatter operand scatter dimension size "
-                       f"{scatter_dim_input_size} must match shard count "
-                       f"{axis_size}")
     del new_shape[scatter_dimension]
 
   new_named_shape = {
@@ -1385,9 +1381,8 @@ def _axis_index_bind(*, axis_name):
     dynamic = core.thread_local_state.trace_state.trace_stack.dynamic
     if (frame.main_trace is None or dynamic.level > frame.main_trace.level):
       return core.Primitive.bind(axis_index_p, axis_name=name)
-    else:
-      trace = frame.main_trace.with_cur_sublevel()
-      return trace.process_axis_index(frame)
+    trace = frame.main_trace.with_cur_sublevel()
+    return trace.process_axis_index(frame)
 
   if not isinstance(axis_name, (tuple, list)):
     return name_idx(axis_name)
@@ -1417,7 +1412,7 @@ def _pdot_impl(x, y, *, axis_name, pos_contract, pos_batch, precision):
 @pdot_p.def_abstract_eval
 def _pdot_abstract_eval(x, y, *, axis_name, pos_contract, pos_batch, precision):
   # TODO(frostig,mattjj,jekbradbury): check inputs have given axis names?
-  if not len(set(axis_name)) == len(axis_name): raise ValueError
+  if len(set(axis_name)) != len(axis_name): raise ValueError
   pos_aval = lax.dot_general_p.abstract_eval(
       x, y, dimension_numbers=[pos_contract, pos_batch],
       precision=precision, preferred_element_type=None)

@@ -130,7 +130,7 @@ def conv_general_dilated(
   dnums = conv_dimension_numbers(lhs.shape, rhs.shape, dimension_numbers)
   if lhs_dilation is None:
     lhs_dilation = (1,) * (lhs.ndim - 2)
-  elif isinstance(padding, str) and not len(lhs_dilation) == lhs_dilation.count(1):
+  elif isinstance(padding, str) and len(lhs_dilation) != lhs_dilation.count(1):
     raise ValueError(
         "String padding is not implemented for transposed convolution "
         "using this op. Please either exactly specify the required padding or "
@@ -240,10 +240,7 @@ def _conv_transpose_padding(k, s, padding):
   """
   if padding == 'SAME':
     pad_len = k + s - 2
-    if s > k - 1:
-      pad_a = k - 1
-    else:
-      pad_a = int(np.ceil(pad_len / 2))
+    pad_a = k - 1 if s > k - 1 else int(np.ceil(pad_len / 2))
   elif padding == 'VALID':
     pad_len = k + s - 2 + _max(k - s, 0)
     pad_a = k - 1
@@ -347,7 +344,7 @@ def _conv_general_dilated_shape_rule(
     msg = ("conv_general_dilated lhs and rhs must have the same number of "
            "dimensions, but got {} and {}.")
     raise ValueError(msg.format(lhs.shape, rhs.shape))
-  if not feature_group_count > 0:
+  if feature_group_count <= 0:
     msg = ("conv_general_dilated feature_group_count "
            "must be a positive integer, got {}.")
     raise ValueError(msg.format(feature_group_count))
@@ -369,7 +366,7 @@ def _conv_general_dilated_shape_rule(
     raise ValueError(msg.format(rhs.shape[dimension_numbers.rhs_spec[0]],
                                 feature_group_count))
 
-  if not batch_group_count > 0:
+  if batch_group_count <= 0:
     msg = ("conv_general_dilated batch_group_count "
            "must be a positive integer, got {}.")
     raise ValueError(msg.format(batch_group_count))
@@ -600,8 +597,6 @@ def _conv_general_dilated_batch_rule(
                                  lhs_dilation, rhs_dilation, dimension_numbers,
                                  feature_group_count, precision=precision,
                                  preferred_element_type=preferred_element_type)
-      out = _reshape_axis_out_of(out_spec[0], lhs.shape[lhs_bdim], out)
-      return out, out_spec[0]
     else:
       new_lhs = _reshape_axis_out_of(lhs_spec[0] + int(lhs_bdim <= lhs_spec[0]),
                                      batch_group_count, lhs)
@@ -614,9 +609,8 @@ def _conv_general_dilated_batch_rule(
                                  feature_group_count, batch_group_count,
                                  precision=precision,
                                  preferred_element_type=preferred_element_type)
-      out = _reshape_axis_out_of(out_spec[0], lhs.shape[lhs_bdim], out)
-      return out, out_spec[0]
-
+    out = _reshape_axis_out_of(out_spec[0], lhs.shape[lhs_bdim], out)
+    return out, out_spec[0]
   elif rhs_bdim is not None:
     if feature_group_count == 1 and batch_group_count == 1:
       new_rhs = _reshape_axis_into(rhs_bdim, rhs_spec[0], rhs)
@@ -626,7 +620,6 @@ def _conv_general_dilated_batch_rule(
                                  precision=precision,
                                  preferred_element_type=preferred_element_type)
       out = _reshape_axis_out_of(out_spec[1], rhs.shape[rhs_bdim], out)
-      return out, out_spec[1]
     else:
       # groups need to be outermost, so we need to factor them out of the
       # rhs output feature dim, then factor the batch dim into the remaining rhs
@@ -649,7 +642,8 @@ def _conv_general_dilated_batch_rule(
       out = _reshape_axis_out_of(out_spec[1], group_count, out)
       out = _reshape_axis_out_of(out_spec[1] + 1, rhs.shape[rhs_bdim], out)
       out = _reshape_axis_into(out_spec[1], out_spec[1] + 1, out)
-      return out, out_spec[1]
+
+    return out, out_spec[1]
 
 def _conv_general_dilated_masking_rule(
         padded_vals, logical_shapes, window_strides, padding, lhs_dilation,

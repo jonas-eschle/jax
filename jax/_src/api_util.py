@@ -54,10 +54,7 @@ def _ensure_str(x: str) -> str:
 
 def _ensure_str_tuple(x: Union[str, Iterable[str]]) -> Tuple[str, ...]:
   """Convert x to a tuple of strings."""
-  if isinstance(x, str):
-    return (x,)
-  else:
-    return tuple(map(_ensure_str, x))
+  return (x, ) if isinstance(x, str) else tuple(map(_ensure_str, x))
 
 @lu.transformation_with_aux
 def flatten_fun(in_tree, *args_flat):
@@ -185,8 +182,7 @@ def _argnums_partial(dyn_argnums, fixed_args, *dyn_args, **kwargs):
   args = [None if arg is unit else arg.val for arg in fixed_args]
   for i, arg in zip(dyn_argnums, dyn_args):
     args[i] = arg
-  ans = yield args, kwargs
-  yield ans
+  yield (yield args, kwargs)
 
 
 def argnames_partial_except(f: lu.WrappedFun, static_argnames: Tuple[str, ...],
@@ -218,8 +214,7 @@ def _argnames_partial(fixed_kwargs: WrapKwArgs, *args, **dyn_kwargs):
   kwargs = {k: None if arg is unit else arg.val
             for k, arg in fixed_kwargs.val.items()}
   kwargs.update(dyn_kwargs)
-  ans = yield args, kwargs
-  yield ans
+  yield (yield args, kwargs)
 
 
 def donation_vector(donate_argnums, args, kwargs) -> Tuple[bool, ...]:

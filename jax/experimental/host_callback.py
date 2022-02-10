@@ -534,7 +534,7 @@ def _inline_host_callback() -> bool:
 
 
 def _use_outfeed(platform: str) -> bool:
-  return (platform in ("tpu", "gpu") or FLAGS.jax_host_callback_outfeed)
+  return platform in {"tpu", "gpu"} or FLAGS.jax_host_callback_outfeed
 
 xops = xla_client._xla.ops
 
@@ -605,21 +605,17 @@ def id_tap(tap_func, arg, *, result=None, tap_with_device=False, **kwargs):
   call_res = _call(tap_func, arg, call_with_device=tap_with_device,
                    result_shape=None, identity=True)
 
-  if result is not None:
-    # Return the results, but add a dependency on the call, to ensure it
-    # is kept in the graph.
-    if FLAGS.jax_host_callback_ad_transforms:
-      call_flat_results, _ = pytree.flatten(call_res)
-      if call_flat_results:
-        call_flat_results = [id_tap_dep_p.bind(r, call_flat_results[0])
-                             for r in flat_results]
-      else:
-        call_flat_results = flat_results
-      return result_treedef.unflatten(call_flat_results)
-    else:
-      return result
-  else:
+  if result is None:
     return call_res
+  if not FLAGS.jax_host_callback_ad_transforms:
+    return result
+  call_flat_results, _ = pytree.flatten(call_res)
+  if call_flat_results:
+    call_flat_results = [id_tap_dep_p.bind(r, call_flat_results[0])
+                         for r in flat_results]
+  else:
+    call_flat_results = flat_results
+  return result_treedef.unflatten(call_flat_results)
 
 
 def id_print(arg, *, result=None, tap_with_device=False,
@@ -712,11 +708,10 @@ def _call(callback_func: Callable, arg, *,
       callback = lambda arg, device, transforms: callback_func(arg, transforms, device=device)
     else:
       callback = lambda arg, device, transforms: callback_func(arg, transforms)
+  elif call_with_device:
+    callback = lambda arg, device, transforms: callback_func(arg, device=device)
   else:
-    if call_with_device:
-      callback = lambda arg, device, transforms: callback_func(arg, device=device)
-    else:
-      callback = lambda arg, device, transforms: callback_func(arg)
+    callback = lambda arg, device, transforms: callback_func(arg)
   params["callback"] = callback
   params["identity"] = identity
   params["arg_treedef"] = arg_treedef
@@ -811,7 +806,7 @@ def _print_tap_func(
 
 
 def _values_to_avals(vals) -> Sequence[core.ShapedArray]:
-  return tuple([core.raise_to_shaped(core.get_aval(v)) for v in vals])
+  return tuple(core.raise_to_shaped(core.get_aval(v)) for v in vals)
 
 ### The id_tap_dep primitive
 # The id_tap_dep_p primitive is used to create a dependency of the result of
@@ -849,10 +844,7 @@ def _id_tap_dep_transpose_rule(cts, arg_res, arg_tap):
     ct_res = _instantiate_zeros(cts, arg_res)
   else:
     ct_res = None
-  if ad.is_undefined_primal(arg_tap):
-    ct_tap = ad.Zero(arg_tap.aval)
-  else:
-    ct_tap = None
+  ct_tap = ad.Zero(arg_tap.aval) if ad.is_undefined_primal(arg_tap) else None
   return (ct_res, ct_tap)
 
 ad.primitive_transposes[id_tap_dep_p] = _id_tap_dep_transpose_rule
@@ -944,12 +936,8 @@ outside_call_p.def_abstract_eval(_outside_call_abstract_eval)
 
 
 def _outside_call_impl(*args, **params):
-  assert not "has_token" in params
-  if _inline_host_callback():
-    device = api.devices()[0]
-    results = _outside_call_run_callback(args, device, send_infeed=False, **params)
-    return results
-  else:
+  assert "has_token" not in params
+  if not _inline_host_callback():
     # We use the jitted-version of the primitive even for eager execution, both
     # so that we do not duplicate logic, but also so that all outfeed is received
     # by the outfeed_listeners, in the same thread from a given device. If we were
@@ -958,6 +946,8 @@ def _outside_call_impl(*args, **params):
     # It would be confusing to process a sequence "id_tap; while" in two
     # different threads.
     return dispatch.apply_primitive(outside_call_p, *args, **params)
+  device = api.devices()[0]
+  return _outside_call_run_callback(args, device, send_infeed=False, **params)
 
 
 outside_call_p.def_impl(_outside_call_impl)
@@ -1417,14 +1407,22 @@ def _rewrite_jaxpr(jaxpr: core.Jaxpr, has_input_token: bool,
     invars = jaxpr.invars + [last_token_var, last_itoken_var]
   else:
     invars = jaxpr.invars
-    # We need tokens but none is given in input; make one depending on all invars
-    eqns.append(
-        core.new_jaxpr_eqn(jaxpr.invars, [last_token_var],
-                           lax.create_token_p, {}, source_info_util.current()))
-    eqns.append(
-        core.new_jaxpr_eqn(jaxpr.invars, [last_itoken_var],
-                           lax.create_token_p, {}, source_info_util.current()))
-
+    eqns.extend((
+        core.new_jaxpr_eqn(
+            jaxpr.invars,
+            [last_token_var],
+            lax.create_token_p,
+            {},
+            source_info_util.current(),
+        ),
+        core.new_jaxpr_eqn(
+            jaxpr.invars,
+            [last_itoken_var],
+            lax.create_token_p,
+            {},
+            source_info_util.current(),
+        ),
+    ))
   for eqn in jaxpr.eqns:
     if not core.primitive_uses_outfeed(eqn.primitive, eqn.params):
       eqns.append(eqn)
@@ -1437,8 +1435,7 @@ def _rewrite_jaxpr(jaxpr: core.Jaxpr, has_input_token: bool,
       last_itoken_var = output_itoken_var
 
   outvars = jaxpr.outvars + ([last_token_var, last_itoken_var] if has_output_token else [])
-  new_jaxpr = core.Jaxpr(jaxpr.constvars, invars, outvars, eqns)
-  return new_jaxpr
+  return core.Jaxpr(jaxpr.constvars, invars, outvars, eqns)
 
 
 def _rewrite_eqn(eqn: core.JaxprEqn, eqns: List[core.JaxprEqn],
@@ -1650,14 +1647,18 @@ def _rewrite_while_outfeed_cond(eqn: core.JaxprEqn, eqns: List[core.JaxprEqn],
   ]
   eqns.append(
       core.new_jaxpr_eqn(
-          eqn.invars[0:cond_nconsts] + carry_invars + [input_token_var, input_itoken_var],
-          pred1_and_token1, xla.xla_call_p,
+          eqn.invars[:cond_nconsts] + carry_invars +
+          [input_token_var, input_itoken_var],
+          pred1_and_token1,
+          xla.xla_call_p,
           dict(
               call_jaxpr=transformed_cond_jaxpr.jaxpr,
               name="cond_before",
-              donated_invars=(False,) * len(transformed_cond_jaxpr.in_avals),
-              inline=False),
-          eqn.source_info))
+              donated_invars=(False, ) * len(transformed_cond_jaxpr.in_avals),
+              inline=False,
+          ),
+          eqn.source_info,
+      ))
   # Make a new cond "lambda pred, carry, token, itoken: pred"
   new_cond_pred_invar = mk_new_var(cond_jaxpr.out_avals[0])
   new_cond_invars = (
@@ -1673,7 +1674,7 @@ def _rewrite_while_outfeed_cond(eqn: core.JaxprEqn, eqns: List[core.JaxprEqn],
   #        (pred2, carry2, token3, itoken3)
   transformed_body_jaxpr = _rewrite_closed_jaxpr(body_jaxpr, True, True)
   new_body_invars_cond_constvars = [
-      mk_new_var(v.aval) for v in eqn.invars[0:cond_nconsts]
+      mk_new_var(v.aval) for v in eqn.invars[:cond_nconsts]
   ]
   new_body_invars_body_constvars = [
       mk_new_var(v.aval)
@@ -1723,15 +1724,18 @@ def _rewrite_while_outfeed_cond(eqn: core.JaxprEqn, eqns: List[core.JaxprEqn],
   pred_out = mk_new_var(cond_jaxpr.out_avals[0])
   eqns.append(
       core.new_jaxpr_eqn(
-          (eqn.invars[0:cond_nconsts + body_nconsts] + [pred1_and_token1[0]] +
-           carry_invars + pred1_and_token1[1:]),
-          ([pred_out] + eqn.outvars + [output_token_var, output_itoken_var]),
+          ((eqn.invars[:cond_nconsts + body_nconsts] + [pred1_and_token1[0]] +
+            carry_invars) + pred1_and_token1[1:]),
+          [pred_out] + eqn.outvars + [output_token_var, output_itoken_var],
           lax.while_p,
           dict(
               cond_jaxpr=new_cond_jaxpr,
               cond_nconsts=0,
               body_jaxpr=new_body_jaxpr,
-              body_nconsts=cond_nconsts + body_nconsts), eqn.source_info))
+              body_nconsts=cond_nconsts + body_nconsts,
+          ),
+          eqn.source_info,
+      ))
 
 
 # We need an identity primitive to simplify rewriting
@@ -1778,8 +1782,8 @@ class _CallbackHandlerData:
     # because we may have cached compilations that embed consumer ids, and we
     # do not want the id reused for other shapes.
     # Used only for the outfeed mechanism.
-    self.callback_registry = dict()
-    self.callback_registry_by_id = dict()
+    self.callback_registry = {}
+    self.callback_registry_by_id = {}
     # For now we keep here the keep_alives for the emit_python_callback. This is
     # a leak. We ought to attach these to the executable.
     self.keep_alives = []

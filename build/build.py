@@ -84,7 +84,7 @@ def check_numpy_version(python_bin_path):
       [python_bin_path, "-c", "import numpy as np; print(np.__version__)"])
   numpy_version = tuple(map(int, version.split(".")[:2]))
   if numpy_version < (1, 19):
-    print("ERROR: JAX requires NumPy 1.19 or newer, found " + version + ".")
+    print(f'ERROR: JAX requires NumPy 1.19 or newer, found {version}.')
     sys.exit(-1)
   return version
 
@@ -304,7 +304,7 @@ def add_boolean_argument(parser, name, default=False, help_str=None):
       const=True,
       type=_parse_string_as_bool,
       help=help_str)
-  group.add_argument("--no" + name, dest=name, action="store_false")
+  group.add_argument(f'--no{name}', dest=name, action="store_false")
 
 
 def main():

@@ -364,7 +364,7 @@ def _exp_taylor(primals_in, series_in):
   u = [x] + series
   v = [lax.exp(x)] + [None] * len(series)
   for k in range(1,len(v)):
-    v[k] = fact(k-1) * sum([_scale(k, j) * v[k-j] * u[j] for j in range(1, k+1)])
+    v[k] = fact(k-1) * sum(_scale(k, j) * v[k-j] * u[j] for j in range(1, k+1))
   primal_out, *series_out = v
   return primal_out, series_out
 jet_rules[lax.exp_p] = _exp_taylor
@@ -377,7 +377,7 @@ def _pow_taylor(primals_in, series_in):
   u = [x] + series
   v = [u_ ** r_] + [None] * len(series)
   for k in range(1, len(v)):
-    v[k] = fact(k-1) * sum([_scale(k, j) * v[k-j] * u[j] for j in range(1, k+1)])
+    v[k] = fact(k-1) * sum(_scale(k, j) * v[k-j] * u[j] for j in range(1, k+1))
   primal_out, *series_out = v
 
   return primal_out, series_out
@@ -411,8 +411,9 @@ def _expit_taylor(primals_in, series_in):
   v = [jax.scipy.special.expit(x)] + [None] * len(series)
   e = [v[0] * (1 - v[0])] + [None] * len(series)  # terms for sigmoid' = sigmoid * (1 - sigmoid)
   for k in range(1, len(v)):
-    v[k] = fact(k-1) * sum([_scale(k, j) * e[k-j] * u[j] for j in range(1, k+1)])
-    e[k] = (1 - v[0]) * v[k] - fact(k) * sum([_scale2(k, j) * v[j] * v[k-j] for j in range(1, k+1)])
+    v[k] = fact(k-1) * sum(_scale(k, j) * e[k-j] * u[j] for j in range(1, k+1))
+    e[k] = (1 - v[0]) * v[k] - fact(k) * sum(
+        _scale2(k, j) * v[j] * v[k - j] for j in range(1, k + 1))
 
   primal_out, *series_out = v
   return primal_out, series_out
@@ -433,7 +434,7 @@ def _log_taylor(primals_in, series_in):
   u = [x] + series
   v = [lax.log(x)] + [None] * len(series)
   for k in range(1, len(v)):
-    conv = sum([_scale(k, j) * v[j] * u[k-j] for j in range(1, k)])
+    conv = sum(_scale(k, j) * v[j] * u[k-j] for j in range(1, k))
     v[k] = (u[k] - fact(k - 1) * conv) / u[0]
   primal_out, *series_out = v
   return primal_out, series_out
