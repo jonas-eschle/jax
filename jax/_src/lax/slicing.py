@@ -203,7 +203,7 @@ class GatherScatterMode(enum.Enum):
       return s
     if s == "clip":
       return GatherScatterMode.CLIP
-    if s == "fill" or s == "drop":
+    if s in ["fill", "drop"]:
       return GatherScatterMode.FILL_OR_DROP
     if s is None or s == "promise_in_bounds":
       return GatherScatterMode.PROMISE_IN_BOUNDS
@@ -598,10 +598,7 @@ def index_in_dim(operand: Array, index: int, axis: int = 0,
     msg = 'index {} is out of bounds for axis {} with size {}'
     raise IndexError(msg.format(index, axis, axis_size))
   result = slice_in_dim(operand, wrapped_index, wrapped_index + 1, 1, axis)
-  if keepdims:
-    return result
-  else:
-    return lax.squeeze(result, (axis,))
+  return result if keepdims else lax.squeeze(result, (axis,))
 
 
 def dynamic_slice_in_dim(operand: Array, start_index: Array,
@@ -620,10 +617,7 @@ def dynamic_index_in_dim(operand: Array, index: Array, axis: int = 0,
                          keepdims: bool = True) -> Array:
   """Convenience wrapper around dynamic_slice to perform int indexing."""
   result = dynamic_slice_in_dim(operand, index, 1, axis)
-  if keepdims:
-    return result
-  else:
-    return lax.squeeze(result, (axis,))
+  return result if keepdims else lax.squeeze(result, (axis,))
 
 
 def dynamic_update_slice_in_dim(operand: Array, update: Array,
@@ -801,10 +795,9 @@ def _dynamic_slice_transpose_rule(t, operand, *start_indices, slice_sizes):
   operand_shape, operand_dtype = operand.aval.shape, operand.aval.dtype
   if type(t) is ad_util.Zero:
     return [ad_util.Zero(operand.aval)] + [None] * len(start_indices)
-  else:
-    zeros = lax.full(operand_shape, 0, operand_dtype)
-    return ([dynamic_update_slice(zeros, t, start_indices)] +
-            [None] * len(start_indices))
+  zeros = lax.full(operand_shape, 0, operand_dtype)
+  return ([dynamic_update_slice(zeros, t, start_indices)] +
+          [None] * len(start_indices))
 
 def _batch_dynamic_slice_indices(indices, bdims):
   if len(indices) == 0:
@@ -1156,8 +1149,10 @@ def _gather_translation_rule(ctx, avals_in, avals_out, operand, indices, *,
 
   operand_aval, indices_aval = avals_in
   dimensions = _gather_dimensions_proto(indices_aval.shape, dimension_numbers)
-  assert (mode == GatherScatterMode.CLIP or
-          mode == GatherScatterMode.PROMISE_IN_BOUNDS), mode
+  assert mode in [
+      GatherScatterMode.CLIP,
+      GatherScatterMode.PROMISE_IN_BOUNDS,
+  ], mode
   # XLA's Gather has clamp semantics, so we can just call it directly.
   return [xops.Gather(operand, indices, dimensions, slice_sizes,
                       indices_are_sorted=indices_are_sorted)]
@@ -1396,8 +1391,10 @@ def _scatter_shape_rule(operand, indices, updates, *, update_jaxpr,
   _no_duplicate_dims(scatter_dims_to_operand_dims, "scatter",
                      "scatter_dims_to_operand_dims")
 
-  max_update_slice_sizes = [operand.shape[i] for i in range(len(operand.shape))
-                            if not i in set(inserted_window_dims)]
+  max_update_slice_sizes = [
+      operand.shape[i] for i in range(len(operand.shape))
+      if i not in set(inserted_window_dims)
+  ]
 
   for i in range(len(update_window_dims)):
     update_window_dim = update_window_dims[i]
@@ -2043,7 +2040,7 @@ def _dynamic_slice_indices(operand, start_indices: Any):
     if start_indices.ndim != 1:
       raise ValueError("Slice indices must be a 1D sequence, got {}"
                        .format(start_indices.shape))
-    start_indices = [i for i in start_indices]
+    start_indices = list(start_indices)
   return [np.asarray(i + d if i < 0 else i, lax._dtype(i))
           if isinstance(i, (int, np.integer)) and core.is_constant_dim(d)
           else lax.select(

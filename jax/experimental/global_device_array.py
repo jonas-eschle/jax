@@ -47,11 +47,8 @@ def _convert_list_args_to_tuple(f):
 
 
 def _canonicalize_mesh_axes(mesh_axes):
-  if not isinstance(mesh_axes, PartitionSpec):
-    pspec = PartitionSpec(*mesh_axes)
-  else:
-    pspec = mesh_axes
-  return pspec
+  return (PartitionSpec(
+      *mesh_axes) if not isinstance(mesh_axes, PartitionSpec) else mesh_axes)
 
 def _get_indices(global_shape: Shape, global_mesh: pxla.Mesh,
                  mesh_axes: MeshAxes) -> Tuple[Index, ...]:
@@ -65,8 +62,7 @@ def _get_indices(global_shape: Shape, global_mesh: pxla.Mesh,
   aval = core.ShapedArray(global_shape, np.float32)
   sharding_spec = pxla.mesh_sharding_specs(
       global_mesh.shape, global_mesh.axis_names)(aval, array_mapping)
-  indices = pxla.spec_to_indices(global_shape, sharding_spec)
-  return indices  # type: ignore
+  return pxla.spec_to_indices(global_shape, sharding_spec)
 
 
 @_convert_list_args_to_tuple
@@ -75,9 +71,7 @@ def get_shard_indices(global_shape: Shape, global_mesh: pxla.Mesh,
                       mesh_axes: MeshAxes) -> Mapping[Device, Index]:
   indices = _get_indices(global_shape, global_mesh, mesh_axes)
   # The type: ignore is to ignore the type returned by `spec_to_indices`.
-  return dict(
-      (d, i)
-      for d, i in safe_zip(global_mesh.devices.flat, indices))  # type: ignore
+  return dict(safe_zip(global_mesh.devices.flat, indices))
 
 
 @_convert_list_args_to_tuple
@@ -349,7 +343,7 @@ class GlobalDeviceArray:
     # multiple accesses should be cheap.
     global_indices_rid = get_shard_indices_replica_ids(
         self._global_shape, self._global_mesh, self._mesh_axes)
-    device_to_buffer = dict((db.device(), db) for db in self._device_buffers)
+    device_to_buffer = {db.device(): db for db in self._device_buffers}
     global_shards = []
     for device, (index, rid) in global_indices_rid.items():
       local_shard = device.process_index == self._current_process

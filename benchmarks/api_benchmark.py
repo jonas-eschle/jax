@@ -272,10 +272,7 @@ def pmap_simple_8_devices(state):
 @required_devices(8)
 def pmap_simple_dispatch_8_devices_100_args(state):
   f = jax.pmap(lambda *args: args[1:] + (args[0] + 1,))
-  args = []
-  for i in range(100):
-    args.append(jnp.array(list(range(i, i+8))))
-
+  args = [jnp.array(list(range(i, i+8))) for i in range(100)]
   args = f(*args)
 
   while state:
@@ -286,10 +283,7 @@ def pmap_simple_dispatch_8_devices_100_args(state):
 @required_devices(8)
 def pmap_simple_8_devices_100_args(state):
   f = jax.pmap(lambda *args: args[1:] + (args[0] + 1,))
-  args = []
-  for i in range(100):
-    args.append(jnp.array(list(range(i, i+8))))
-
+  args = [jnp.array(list(range(i, i+8))) for i in range(100)]
   # Warmup loop.
   out = f(*args)
 

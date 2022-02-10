@@ -29,10 +29,7 @@ traceback_util.register_exclusion(__file__)
 T = TypeVar("T")
 U = TypeVar("U")
 
-if TYPE_CHECKING:
-  PyTreeDef = pytree.PyTreeDef
-else:
-  PyTreeDef = Any
+PyTreeDef = pytree.PyTreeDef if TYPE_CHECKING else Any
 
 
 def tree_flatten(tree, is_leaf: Optional[Callable[[Any], bool]] = None):
@@ -218,19 +215,17 @@ def _replace_nones(sentinel, tree):
   """Replaces ``None`` in ``tree`` with ``sentinel``."""
   if tree is None:
     return sentinel
+  if handler := _registry.get(type(tree)):
+    children, metadata = handler.to_iter(tree)
+    proc_children = [_replace_nones(sentinel, child) for child in children]
+    return handler.from_iter(metadata, proc_children)
+  elif isinstance(tree, tuple) and hasattr(tree, '_fields'):
+    # handle namedtuple as a special case, based on heuristic
+    children = iter(tree)
+    proc_children = [_replace_nones(sentinel, child) for child in children]
+    return type(tree)(*proc_children)
   else:
-    handler = _registry.get(type(tree))
-    if handler:
-      children, metadata = handler.to_iter(tree)
-      proc_children = [_replace_nones(sentinel, child) for child in children]
-      return handler.from_iter(metadata, proc_children)
-    elif isinstance(tree, tuple) and hasattr(tree, '_fields'):
-      # handle namedtuple as a special case, based on heuristic
-      children = iter(tree)
-      proc_children = [_replace_nones(sentinel, child) for child in children]
-      return type(tree)(*proc_children)
-    else:
-      return tree
+    return tree
 
 no_initializer = object()
 
@@ -334,21 +329,15 @@ class Partial(functools.partial):
   Traced<ShapedArray(int32[], weak_type=True)>with<DynamicJaxprTrace(level=0/1)>
   """
   def __new__(klass, func, *args, **kw):
-    # In Python 3.10+, if func is itself a functools.partial instance,
-    # functools.partial.__new__ would merge the arguments of this Partial
-    # instance with the arguments of the func. We box func in a class that does
-    # not (yet) have a `func` attribute to defeat this optimization, since we
-    # care exactly which arguments are considered part of the pytree.
-    if isinstance(func, functools.partial):
-      original_func = func
-      func = _HashableCallableShim(original_func)
-      out = super(Partial, klass).__new__(klass, func, *args, **kw)
-      func.func = original_func.func
-      func.args = original_func.args
-      func.keywords = original_func.keywords
-      return out
-    else:
+    if not isinstance(func, functools.partial):
       return super(Partial, klass).__new__(klass, func, *args, **kw)
+    original_func = func
+    func = _HashableCallableShim(original_func)
+    out = super(Partial, klass).__new__(klass, func, *args, **kw)
+    func.func = original_func.func
+    func.args = original_func.args
+    func.keywords = original_func.keywords
+    return out
 
 
 register_pytree_node(
@@ -371,8 +360,7 @@ def broadcast_prefix(prefix_tree: Any, full_tree: Any,
   return result
 
 def flatten_one_level(pytree: Any) -> Tuple[List[Any], Hashable]:
-  handler = _registry.get(type(pytree))
-  if handler:
+  if handler := _registry.get(type(pytree)):
     children, meta = handler.to_iter(pytree)
     return list(children), meta
   elif isinstance(pytree, tuple) and hasattr(pytree, '_fields'):
@@ -414,8 +402,7 @@ class FlattenedKeyPathEntry(KeyPathEntry):  # fallback
 
 def _child_keys(pytree: Any) -> List[KeyPathEntry]:
   assert not treedef_is_leaf(tree_structure(pytree))
-  handler = _keypath_registry.get(type(pytree))
-  if handler:
+  if handler := _keypath_registry.get(type(pytree)):
     return handler(pytree)
   elif isinstance(pytree, tuple) and hasattr(pytree, '_fields'):
     # handle namedtuple as a special case, based on heuristic

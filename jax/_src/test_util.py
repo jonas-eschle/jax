@@ -121,9 +121,8 @@ def with_jax_dtype_defaults(func, use_defaults=True):
     result = func(*args, **kwargs)
     if isinstance(use_defaults, bool):
       return tree_map(to_default_dtype, result) if use_defaults else result
-    else:
-      f = lambda arr, use_default: to_default_dtype(arr) if use_default else arr
-      return tree_map(f, result, use_defaults)
+    f = lambda arr, use_default: to_default_dtype(arr) if use_default else arr
+    return tree_map(f, result, use_defaults)
   return wrapped
 
 def is_sequence(x):
@@ -467,12 +466,11 @@ def is_device_cuda():
 def _get_device_tags():
   """returns a set of tags definded for the device under test"""
   if is_device_rocm():
-    device_tags = set([device_under_test(), "rocm"])
+    return set([device_under_test(), "rocm"])
   elif is_device_cuda():
-    device_tags = set([device_under_test(), "cuda"])
+    return set([device_under_test(), "cuda"])
   else:
-    device_tags = set([device_under_test()])
-  return device_tags
+    return set([device_under_test()])
 
 def skip_on_devices(*disabled_devices):
   """A decorator for test methods to skip the test on certain devices."""
@@ -613,10 +611,8 @@ def _rand_dtype(rand, shape, dtype, scale=1., post=lambda x: x):
     r = lambda: np.asarray(scale * abs(rand(*_dims_of_shape(shape))), dtype)
   else:
     r = lambda: np.asarray(scale * rand(*_dims_of_shape(shape)), dtype)
-  if _dtypes.issubdtype(dtype, np.complexfloating):
-    vals = r() + 1.0j * r()
-  else:
-    vals = r()
+  vals = (r() + 1.0j * r()
+          if _dtypes.issubdtype(dtype, np.complexfloating) else r())
   return _cast_to_shape(np.asarray(post(vals), dtype), shape, dtype)
 
 
@@ -827,8 +823,7 @@ def check_raises_regexp(thunk, err_type, pattern):
 
 def iter_eqns(jaxpr):
   # TODO(necula): why doesn't this search in params?
-  for eqn in jaxpr.eqns:
-    yield eqn
+  yield from jaxpr.eqns
   for subjaxpr in core.subjaxprs(jaxpr):
     yield from iter_eqns(subjaxpr)
 
@@ -1142,8 +1137,7 @@ def create_global_mesh(mesh_shape, axis_names):
     raise unittest.SkipTest(f"Test requires {size} global devices.")
   devices = sorted(api.devices(), key=lambda d: d.id)
   mesh_devices = np.array(devices[:size]).reshape(mesh_shape)
-  global_mesh = Mesh(mesh_devices, axis_names)
-  return global_mesh
+  return Mesh(mesh_devices, axis_names)
 
 
 class _cached_property:

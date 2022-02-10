@@ -115,8 +115,8 @@ class ResourceEnv(NamedTuple):
   loops: Tuple[_Loop, ...]
 
   def with_mesh(self, mesh: Mesh):
-    overlap = set(mesh.axis_names) & (self.resource_axes - set(self.physical_mesh.axis_names))
-    if overlap:
+    if overlap := set(mesh.axis_names) & (
+        self.resource_axes - set(self.physical_mesh.axis_names)):
       raise ValueError(f"Cannot update the mesh of the current resource "
                        f"environment. The new mesh shadows already defined axes "
                        f"{show_axes(overlap)}")
@@ -134,7 +134,7 @@ class ResourceEnv(NamedTuple):
 
   @property
   def loop_resource_axes(self) -> Set[ResourceAxisName]:
-    return set(loop.name for loop in self.loops)
+    return {loop.name for loop in self.loops}
 
   @property
   def resource_axes(self) -> Set[ResourceAxisName]:
@@ -641,8 +641,7 @@ def xmap(fun: Callable,
     frozen_global_axis_sizes = _get_axis_sizes(args_flat, in_axes_flat,
                                                axis_sizes, axis_resource_count)
 
-    missing_sizes = defined_names - set(frozen_global_axis_sizes.keys())
-    if missing_sizes:
+    if missing_sizes := defined_names - set(frozen_global_axis_sizes.keys()):
       raise ValueError(f"Failed to infer size of axes: {', '.join(unsafe_map(str, missing_sizes))}. "
                        f"You've probably passed in empty containers in place of arguments that had "
                        f"those axes in their in_axes. Provide the sizes of missing axes explicitly "
@@ -757,25 +756,24 @@ def make_xmap_callable(fun: lu.WrappedFun,
   f = plan.vectorize_and_loop(f, in_axes, out_axes)
 
   used_resources = _jaxpr_resources(jaxpr, resource_env) | set(it.chain(*axis_resources.values()))
-  used_mesh_axes = used_resources & resource_env.physical_resource_axes
-  if used_mesh_axes:
-    assert spmd_in_axes is None and spmd_out_axes_thunk is None  # No outer xmaps, so should be None
-    mesh_in_axes, mesh_out_axes = plan.to_mesh_axes(in_axes, out_axes)
-    mesh = resource_env.physical_mesh
-    global_in_avals = [mesh.local_to_global(ax, av)
-                       for ax, av in safe_zip(mesh_in_axes, in_avals)]
-    if config.experimental_xmap_spmd_lowering_manual:
-      tiling_method = pxla.TilingMethod.MANUAL
-    else:
-      tiling_method = pxla.TilingMethod.VECTORIZE
-    return pxla.lower_mesh_computation(
-        f, name, mesh,
-        mesh_in_axes, mesh_out_axes, donated_invars,
-        use_spmd_lowering, global_in_avals,
-        tiling_method=tiling_method, in_is_gda=[False] * len(global_in_avals))
-  else:
+  if not (used_mesh_axes :=
+          used_resources & resource_env.physical_resource_axes):
     return dispatch.lower_xla_callable(
         f, None, backend, name, donated_invars, *((a, None) for a in in_avals))
+  assert spmd_in_axes is None and spmd_out_axes_thunk is None  # No outer xmaps, so should be None
+  mesh_in_axes, mesh_out_axes = plan.to_mesh_axes(in_axes, out_axes)
+  mesh = resource_env.physical_mesh
+  global_in_avals = [mesh.local_to_global(ax, av)
+                     for ax, av in safe_zip(mesh_in_axes, in_avals)]
+  if config.experimental_xmap_spmd_lowering_manual:
+    tiling_method = pxla.TilingMethod.MANUAL
+  else:
+    tiling_method = pxla.TilingMethod.VECTORIZE
+  return pxla.lower_mesh_computation(
+      f, name, mesh,
+      mesh_in_axes, mesh_out_axes, donated_invars,
+      use_spmd_lowering, global_in_avals,
+      tiling_method=tiling_method, in_is_gda=[False] * len(global_in_avals))
 
 class EvaluationPlan(NamedTuple):
   """Encapsulates preprocessing common to top-level xmap invocations and its translation rule."""
@@ -993,9 +991,8 @@ def _typecheck_xmap(
                       mapped_in_avals)
 
   mapped_out_avals = [v.aval for v in call_jaxpr.outvars]
-  out_avals = [_insert_aval_axes(a, a_out_axes, local_axis_sizes)
+  return [_insert_aval_axes(a, a_out_axes, local_axis_sizes)
                for a, a_out_axes in zip(mapped_out_avals, out_axes)]
-  return out_avals
 core.custom_typechecks[xmap_p] = _typecheck_xmap
 
 def show_axes(axes):
@@ -1021,24 +1018,25 @@ def _resource_typing_xmap(avals,
 
   call_jaxpr = params['call_jaxpr']
   pxla.resource_typecheck(
-      params['call_jaxpr'], resource_env, inner_axis_resources,
-      lambda: (f"an xmapped function {params['name']} " +
-               (f"(xmap called at {source_info_util.summarize(source_info)})"
-                if source_info else "")))
-
+      call_jaxpr,
+      resource_env,
+      inner_axis_resources,
+      lambda: (f"an xmapped function {params['name']} " + (
+          f"(xmap called at {source_info_util.summarize(source_info)})"
+          if source_info else "")),
+  )
   for v, axes in zip(call_jaxpr.outvars, params['out_axes']):
     broadcast_axes = set(axes) - set(v.aval.named_shape)
     used_resources = set(it.chain.from_iterable(
         inner_axis_resources[a] for a in v.aval.named_shape))
     for baxis in broadcast_axes:
       baxis_resources = set(inner_axis_resources[baxis])
-      overlap = baxis_resources & used_resources
-      if overlap:
+      if overlap := baxis_resources & used_resources:
         resource_to_axis = {}
         for axis in v.aval.named_shape:
           for raxis in inner_axis_resources[axis]:
             resource_to_axis[raxis] = axis
-        partitioning_axes = set(resource_to_axis[raxis] for raxis in overlap)
+        partitioning_axes = {resource_to_axis[raxis] for raxis in overlap}
         raise JAXTypeError(
             f"One of xmapped function ({params['name']}) outputs is broadcast "
             f"along axis `{baxis}` which is assigned to resources "
@@ -1400,7 +1398,7 @@ def _xmap_lowering_rule_replica(ctx, *in_nodes,
                                        xla.wrap_name(name, 'xmap')))
   tiled_outs = mlir.jaxpr_subcomp(sub_ctx, vectorized_jaxpr, (), *tiled_ins)
 
-  outs = [
+  return [
       mlir.lower_fun(
           partial(_untile, out_axes=ans_out_axes, axis_sizes=local_mesh_shape,
                   platform=ctx.module_context.platform),
@@ -1413,7 +1411,6 @@ def _xmap_lowering_rule_replica(ctx, *in_nodes,
       for v, vectorized_outvar, tiled_out, ans_out_axes
       in zip(call_jaxpr.outvars, vectorized_jaxpr.outvars, tiled_outs,
              mesh_out_axes)]
-  return outs
 
 
 def _xmap_lowering_rule_spmd(ctx, *global_in_nodes,
@@ -1505,10 +1502,8 @@ def _xmap_lowering_rule_spmd_manual(ctx, *global_in_nodes,
   sub_ctx = ctx.module_context.replace(
       name_stack=xla.extend_name_stack(ctx.module_context.name_stack,
                                        xla.wrap_name(name, 'xmap')))
-  global_out_nodes = mlir.jaxpr_subcomp(sub_ctx, vectorized_jaxpr, (),
+  return mlir.jaxpr_subcomp(sub_ctx, vectorized_jaxpr, (),
                                         *([n] for n in global_in_nodes))
-
-  return global_out_nodes
 
 
 def _xmap_translation_rule(*args, **kwargs):
@@ -1580,7 +1575,7 @@ def _xmap_translation_rule_replica(ctx, avals_in, avals_out, *in_nodes,
                                        xla.wrap_name(name, 'xmap')))
   tiled_outs = xla.jaxpr_subcomp(sub_ctx, vectorized_jaxpr, (), *tiled_ins)
 
-  outs = [
+  return [
       xla.lower_fun(
           partial(_untile, out_axes=ans_out_axes, axis_sizes=local_mesh_shape,
                   platform=ctx.platform),
@@ -1590,7 +1585,6 @@ def _xmap_translation_rule_replica(ctx, avals_in, avals_out, *in_nodes,
       if v.aval is not core.abstract_unit else tiled_out
       for v, tiled_out, ans_out_axes
       in zip(vectorized_jaxpr.outvars, tiled_outs, mesh_out_axes)]
-  return outs
 
 def _tile_base_indices(tile_shape, axes, axis_sizes):
   zero = np.zeros((), dtype=np.int32)
@@ -1694,15 +1688,14 @@ def _xmap_translation_rule_spmd(ctx, avals_in, avals_out, *global_in_nodes,
 
   def set_sharding(node, aval, aval_axes):
     sharding_proto = global_sharding_spec(aval, aval_axes).sharding_proto()
-    if not config.experimental_xmap_ensure_fixed_sharding:
-      # Do not specify sharding on other dimensions.
-      unspecified_dims = set(range(aval.ndim))
-      for axis in set(aval_axes.values()):
-        unspecified_dims.remove(axis)
-      return xla.set_sharding_proto(ctx.builder, node, sharding_proto,
-                                    unspecified_dims)
-    else:
+    if config.experimental_xmap_ensure_fixed_sharding:
       return xla.set_sharding_proto(ctx.builder, node, sharding_proto)
+    # Do not specify sharding on other dimensions.
+    unspecified_dims = set(range(aval.ndim))
+    for axis in set(aval_axes.values()):
+      unspecified_dims.remove(axis)
+    return xla.set_sharding_proto(ctx.builder, node, sharding_proto,
+                                  unspecified_dims)
 
   sharded_global_in_nodes = [
       set_sharding(node, aval, aval_axes) if aval_axes else node for node, aval,
@@ -1885,11 +1878,10 @@ def _merge_leading_axis(x, axis: Optional[int]):
   if axis is None:
     # We assume that the output does not vary along the leading axis
     return lax.index_in_dim(x, 0, axis=0, keepdims=False)
-  else:
-    x_moved = moveaxis(x, 0, axis)
-    shape = list(x_moved.shape)
-    shape[axis:axis + 2] = [shape[axis] * shape[axis + 1]]
-    return x_moved.reshape(shape)
+  x_moved = moveaxis(x, 0, axis)
+  shape = list(x_moved.shape)
+  shape[axis:axis + 2] = [shape[axis] * shape[axis + 1]]
+  return x_moved.reshape(shape)
 
 
 def _slice_tile(x, dim: Optional[int], i, n: int):
@@ -1915,7 +1907,7 @@ def _unzip_axis_resources(axis_resources: Dict[AxisName, Tuple[ResourceAxisName,
         first_loop += 1
     physical_axis_resources[axis] = raxes[:first_loop]
     loop_resources = loop_axis_resources[axis] = raxes[first_loop:]
-    if not all(name in loop_resource_axes for name in loop_resources):
+    if any(name not in loop_resource_axes for name in loop_resources):
       raise NotImplementedError("Loop resources cannot appear before mesh axes "
                                 "in the resource_axis argument")
   return physical_axis_resources, loop_axis_resources
@@ -1931,8 +1923,7 @@ def _check_out_avals_vs_out_axes(out_avals: Sequence[core.AbstractValue],
         raise AssertionError(f"Only array abstract values can have non-empty "
                              f"out_axes, but {aval} has {axes}")
       continue
-    undeclared_axes = (set(aval.named_shape) - set(axes)) & defined_axes
-    if undeclared_axes:
+    if undeclared_axes := (set(aval.named_shape) - set(axes)) & defined_axes:
       undeclared_axes_str = sorted([str(axis) for axis in undeclared_axes])
       raise TypeError(f"One of xmap results has an out_axes specification of "
                       f"{axes.user_repr}, but is actually mapped along more axes "
@@ -1970,10 +1961,17 @@ def _fix_inferred_spmd_sharding(jaxpr, resource_env, gen_fresh_name = None):
     tmp_outvars = [gen_fresh_name(v.aval) for v in eqn.outvars]
     new_eqns.append(core.JaxprEqn(eqn.invars, tmp_outvars, eqn.primitive,
                                   dict(eqn.params, **new_jaxpr_params), eqn.source_info))
-    for outvar, tmpvar in zip(eqn.outvars, tmp_outvars):
-      new_eqns.append(core.JaxprEqn([tmpvar], [outvar], sharding_constraint_p,
-                      dict(resource_env=resource_env, axis_resources=ParsedPartitionSpec((), ())),
-                      eqn.source_info))
+    new_eqns.extend(
+        core.JaxprEqn(
+            [tmpvar],
+            [outvar],
+            sharding_constraint_p,
+            dict(
+                resource_env=resource_env,
+                axis_resources=ParsedPartitionSpec((), ()),
+            ),
+            eqn.source_info,
+        ) for outvar, tmpvar in zip(eqn.outvars, tmp_outvars))
   return core.Jaxpr(jaxpr.constvars, jaxpr.invars, jaxpr.outvars, new_eqns)
 
 def _flatten_axes(what, tree, axes, tupled_args):

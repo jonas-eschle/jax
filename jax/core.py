@@ -189,7 +189,7 @@ class Var:
 
 def _encode_digits_alphabetic(n):
   s = ''
-  while len(s) == 0 or n:
+  while not s or n:
     n, i = n // 26, n % 26
     s = chr(97 + i % 26) + s
   return s
@@ -312,10 +312,7 @@ def traverse_jaxpr_params(f, params):
 
 def eval_jaxpr(jaxpr: Jaxpr, consts, *args):
   def read(v):
-    if type(v) is Literal:
-      return v.val
-    else:
-      return env[v]
+    return v.val if type(v) is Literal else env[v]
 
   def write(v, val):
     env[v] = val
@@ -727,11 +724,10 @@ def trace_state_clean() -> bool:
 
 def reset_trace_state() -> bool:
   "Reset the global trace state and return True if it was already clean."
-  if not trace_state_clean():
-    thread_local_state.trace_state.__init__()  # type: ignore
-    return False
-  else:
+  if trace_state_clean():
     return True
+  thread_local_state.trace_state.__init__()  # type: ignore
+  return False
 
 def cur_sublevel() -> Sublevel:
   return thread_local_state.trace_state.substack[-1]
@@ -758,8 +754,7 @@ def maybe_find_leaked_tracers(x: Optional[Union[MainTrace, Sublevel]]
   # Trigger garbage collection to filter out cyclical dependency false positives
   gc.collect()
   traces = list(filter(lambda x: isinstance(x, Trace), gc.get_referrers(x)))
-  tracers = list(filter(lambda x: isinstance(x, Tracer), gc.get_referrers(*traces)))
-  return tracers
+  return list(filter(lambda x: isinstance(x, Tracer), gc.get_referrers(*traces)))
 
 def leaked_tracer_error(name: str, t, tracers: List[Tracer]) -> Exception:
   assert tracers
@@ -791,8 +786,8 @@ def new_main(trace_type: Type[Trace],
     t = ref(main)
     del main
     if t() is not None:
-      leaked_tracers = maybe_find_leaked_tracers(t())
-      if leaked_tracers: raise leaked_tracer_error("trace", t(), leaked_tracers)
+      if leaked_tracers := maybe_find_leaked_tracers(t()):
+        raise leaked_tracer_error("trace", t(), leaked_tracers)
 
 @contextmanager
 def new_base_main(trace_type: Type[Trace]) -> Generator[MainTrace, None, None]:
@@ -813,8 +808,8 @@ def new_base_main(trace_type: Type[Trace]) -> Generator[MainTrace, None, None]:
     t = ref(main)
     del main
     if t() is not None:
-      leaked_tracers = maybe_find_leaked_tracers(t())
-      if leaked_tracers: raise leaked_tracer_error("trace", t(), leaked_tracers)
+      if leaked_tracers := maybe_find_leaked_tracers(t()):
+        raise leaked_tracer_error("trace", t(), leaked_tracers)
 
 @contextmanager
 def ensure_compile_time_eval():
@@ -892,15 +887,11 @@ def new_sublevel() -> Generator[None, None, None]:
     t = ref(sublevel)
     del sublevel
     if t() is not None:
-      leaked_tracers = maybe_find_leaked_tracers(t())
-      if leaked_tracers:
+      if leaked_tracers := maybe_find_leaked_tracers(t()):
         raise leaked_tracer_error("sublevel", t(), leaked_tracers)
 
 def full_lower(val):
-  if isinstance(val, Tracer):
-    return val.full_lower()
-  else:
-    return val
+  return val.full_lower() if isinstance(val, Tracer) else val
 
 def find_top_trace(xs) -> Trace:
   top_tracer = max((x for x in xs if isinstance(x, Tracer)),
@@ -994,8 +985,8 @@ def check_valid_jaxtype(x):
 
 def concrete_aval(x):
   for typ in type(x).__mro__:
-    handler = pytype_aval_mappings.get(typ)
-    if handler: return handler(x)
+    if handler := pytype_aval_mappings.get(typ):
+      return handler(x)
   if hasattr(x, '__jax_array__'):
     return concrete_aval(x.__jax_array__())
   raise TypeError(f"Value {repr(x)} with type {type(x)} is not a valid JAX "
@@ -1003,10 +994,7 @@ def concrete_aval(x):
 
 
 def get_aval(x):
-  if isinstance(x, Tracer):
-    return x.aval
-  else:
-    return concrete_aval(x)
+  return x.aval if isinstance(x, Tracer) else concrete_aval(x)
 
 
 pytype_aval_mappings: Dict[type, Callable[[Any], AbstractValue]] = {}
@@ -1043,13 +1031,12 @@ def concrete_or_error(force: Any, val: Any, context=""):
   """Like force(val), but gives the context in the error message."""
   if force is None:
     force = lambda x: x
-  if isinstance(val, Tracer):
-    if isinstance(val.aval, ConcreteArray):
-      return force(val.aval.val)
-    else:
-      raise ConcretizationTypeError(val, context)
-  else:
+  if not isinstance(val, Tracer):
     return force(val)
+  if isinstance(val.aval, ConcreteArray):
+    return force(val.aval.val)
+  else:
+    raise ConcretizationTypeError(val, context)
 
 
 def _short_dtype_name(dtype):
@@ -1100,13 +1087,12 @@ class UnshapedArray(AbstractValue):
                          self.weak_type)
 
   def join(self, other):
-    if self.dtype == other.dtype:
-      if self.weak_type == other.weak_type:
-        return self
-      else:
-        return UnshapedArray(self.dtype, weak_type=False)
-    else:
+    if self.dtype != other.dtype:
       raise TypeError(self, other)
+    if self.weak_type == other.weak_type:
+      return self
+    else:
+      return UnshapedArray(self.dtype, weak_type=False)
 
   def str_short(self, short_dtypes=False) -> str:
     return _short_dtype_name(self.dtype) if short_dtypes else self.dtype.name
@@ -1337,8 +1323,8 @@ def raise_to_shaped(aval: AbstractValue, weak_type=None):
   if weak_type is None:
     weak_type = getattr(aval, 'weak_type', False)
   for typ in aval_type.__mro__:
-    handler = raise_to_shaped_mappings.get(typ)
-    if handler: return handler(aval, weak_type)
+    if handler := raise_to_shaped_mappings.get(typ):
+      return handler(aval, weak_type)
   raise TypeError(type(aval))
 
 raise_to_shaped_mappings : Dict[type, Callable] = {
@@ -1446,8 +1432,7 @@ def _dim_handler_and_canonical(*dlist: DimSize) -> Tuple[DimensionHandler, Tuple
   special_handlers = set()
   canonical = []
   for d in dlist:
-    handler = _SPECIAL_DIMENSION_HANDLERS.get(type(d))
-    if handler:
+    if handler := _SPECIAL_DIMENSION_HANDLERS.get(type(d)):
       special_handlers.add(handler)
       canonical.append(d)
     else:
@@ -1478,7 +1463,7 @@ def symbolic_equal_dim(d1: DimSize, d2: DimSize) -> bool:
 def symbolic_equal_one_of_dim(d1: DimSize, dlist: Sequence[DimSize]) -> bool:
   if any(d1 is d for d in dlist): return True  # identical always implies equal
   handler, ds = _dim_handler_and_canonical(d1, *dlist)
-  return any([handler.symbolic_equal(ds[0], d) for d in ds[1:]])
+  return any(handler.symbolic_equal(ds[0], d) for d in ds[1:])
 
 def symbolic_equal_shape(s1: Shape, s2: Shape) -> bool:
   return (len(s1) == len(s2) and
@@ -1518,7 +1503,7 @@ def divide_shape_sizes(s1: Shape, s2: Shape) -> DimSize:
   return handler.divide_shape_sizes(ds[:len(s1)], ds[len(s1):])
 
 def same_shape_sizes(s1: Shape, s2: Shape) -> bool:
-  return 1 == divide_shape_sizes(s1, s2)
+  return divide_shape_sizes(s1, s2) == 1
 
 def is_empty_shape(s: Shape) -> bool:
   return any(symbolic_equal_dim(d, 0) for d in s)
@@ -1668,9 +1653,7 @@ def join_named_shapes(*named_shapes):
 
 # TODO: Make canonicalize_shape return named shapes?
 def as_named_shape(shape) -> NamedShape:
-  if isinstance(shape, NamedShape):
-    return shape
-  return NamedShape(*shape)
+  return shape if isinstance(shape, NamedShape) else NamedShape(*shape)
 
 
 # ------------------- Call -------------------
@@ -1702,9 +1685,10 @@ def process_env_traces_call(primitive: CallPrimitive, level: int,
   params = dict(params_tuple)
   todo = []
   while True:
-    tracers = [x for x in outs if isinstance(x, Tracer)
-               and (level is None or x._trace.level > level)]
-    if tracers:
+    if tracers := [
+        x for x in outs
+        if isinstance(x, Tracer) and (level is None or x._trace.level > level)
+    ]:
       ans = max(tracers, key=lambda x: x._trace.level)
     else:
       break
@@ -1752,13 +1736,10 @@ def _param_uses_outfeed(param):
 def primitive_uses_outfeed(prim: Primitive, params: Dict) -> bool:
   if prim in outfeed_primitives:
     return True
-  for param in params.values():
-    if isinstance(param, tuple):
-      if any(unsafe_map(_param_uses_outfeed, param)):
-        return True
-    elif _param_uses_outfeed(param):
-      return True
-  return False
+  return any(
+      isinstance(param, tuple) and any(unsafe_map(_param_uses_outfeed, param))
+      or not isinstance(param, tuple) and _param_uses_outfeed(param)
+      for param in params.values())
 
 # ------------------- Map -------------------
 
@@ -1812,9 +1793,10 @@ def process_env_traces_map(primitive: MapPrimitive, level: int,
   todo = []
   out_axes_transforms = []
   while True:
-    tracers = [x for x in outs if isinstance(x, Tracer)
-               and (level is None or x._trace.level > level)]
-    if tracers:
+    if tracers := [
+        x for x in outs
+        if isinstance(x, Tracer) and (level is None or x._trace.level > level)
+    ]:
       ans = max(tracers, key=lambda x: x._trace.level)
     else:
       break
@@ -2102,11 +2084,10 @@ def _check_jaxpr(ctx_factory: Callable[[], 'JaxprPpContext'], jaxpr: Jaxpr,
   def read(v: Atom) -> AbstractValue:
     if isinstance(v, Literal):
       return raise_to_shaped(get_aval(v.val))
-    else:
-      if v not in env:
-        ctx = ctx_factory()
-        raise JaxprTypeError(f"Variable '{pp_var(v, ctx)}' not defined")
-      return env[v]
+    if v not in env:
+      ctx = ctx_factory()
+      raise JaxprTypeError(f"Variable '{pp_var(v, ctx)}' not defined")
+    return env[v]
 
   def write(v: Var, a: AbstractValue) -> None:
     if v in env:
@@ -2181,8 +2162,7 @@ def check_call(ctx_factory, prim, in_avals, params):
 
   _check_jaxpr(ctx_factory, call_jaxpr, in_avals)
 
-  out_avals = [v.aval for v in call_jaxpr.outvars]
-  return out_avals
+  return [v.aval for v in call_jaxpr.outvars]
 
 def check_map(ctx_factory, prim, in_avals, params):
   if "call_jaxpr" not in params:
@@ -2216,9 +2196,11 @@ def check_map(ctx_factory, prim, in_avals, params):
     _check_jaxpr(ctx_factory, call_jaxpr, mapped_avals)
 
   mapped_out_avals = [v.aval for v in call_jaxpr.outvars]
-  out_avals = [unmapped_aval(axis_size, axis_name, out_axis, aval) if out_axis is not None else aval
-               for aval, out_axis in zip(mapped_out_avals, out_axes)]
-  return out_avals
+  return [
+      unmapped_aval(axis_size, axis_name, out_axis, aval)
+      if out_axis is not None else aval
+      for aval, out_axis in zip(mapped_out_avals, out_axes)
+  ]
 
 
 # ------------------- Jaxpr printed representation -------------------
@@ -2237,12 +2219,11 @@ def pp_var(v: Var, context: JaxprPpContext) -> str:
   return f"{_encode_digits_alphabetic(context.var_ids[v])}{v.suffix}"
 
 def pp_aval(a: AbstractValue, context: JaxprPpContext) -> str:
-  if isinstance(a, DShapedArray):
-    shape = [pp_var(d, context) if type(d) is Var else str(d) for d in a.shape]
-    dtype = _short_dtype_name(a.dtype)
-    return f'{dtype}[{",".join(shape)}]'
-  else:
+  if not isinstance(a, DShapedArray):
     return a.str_short(short_dtypes=True)
+  shape = [pp_var(d, context) if type(d) is Var else str(d) for d in a.shape]
+  dtype = _short_dtype_name(a.dtype)
+  return f'{dtype}[{",".join(shape)}]'
 
 def pp_vars(vs: Sequence[Any], context: JaxprPpContext,
             *, separator="", print_shapes: bool = False) -> pp.Doc:

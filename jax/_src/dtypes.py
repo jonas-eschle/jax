@@ -63,10 +63,7 @@ def _canonicalize_dtype(x64_enabled, dtype):
   except TypeError as e:
     raise TypeError(f'dtype {dtype!r} not understood') from e
 
-  if x64_enabled:
-    return dtype
-  else:
-    return _dtype_to_32bit_dtype.get(dtype, dtype)
+  return dtype if x64_enabled else _dtype_to_32bit_dtype.get(dtype, dtype)
 
 def canonicalize_dtype(dtype):
   return _canonicalize_dtype(config.x64_enabled, dtype)
@@ -119,9 +116,9 @@ def _scalar_type_to_dtype(typ: type, value: Any = None):
   OverflowError: Python int 9223372036854775808 too large to convert to int32
   """
   dtype = canonicalize_dtype(python_scalar_dtypes[typ])
-  if typ is int and value is not None:
-    if value < np.iinfo(dtype).min or value > np.iinfo(dtype).max:
-      raise OverflowError(f"Python int {value} too large to convert to {dtype}")
+  if (typ is int and value is not None
+      and (value < np.iinfo(dtype).min or value > np.iinfo(dtype).max)):
+    raise OverflowError(f"Python int {value} too large to convert to {dtype}")
   return dtype
 
 

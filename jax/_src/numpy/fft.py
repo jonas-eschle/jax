@@ -35,7 +35,7 @@ def _fft_norm(s, func_name, norm):
 
 
 def _fft_core(func_name, fft_type, a, s, axes, norm):
-  full_name = "jax.numpy.fft." + func_name
+  full_name = f'jax.numpy.fft.{func_name}'
 
   if s is not None:
     s = tuple(map(operator.index, s))
@@ -48,11 +48,7 @@ def _fft_core(func_name, fft_type, a, s, axes, norm):
 
   orig_axes = axes
   if axes is None:
-    if s is None:
-      axes = range(a.ndim)
-    else:
-      axes = range(a.ndim - len(s), a.ndim)
-
+    axes = range(a.ndim) if s is None else range(a.ndim - len(s), a.ndim)
   if len(axes) != len(set(axes)):
     raise ValueError(
         "%s does not support repeated axes. Got axes %s." % (full_name, axes))
@@ -79,13 +75,12 @@ def _fft_core(func_name, fft_type, a, s, axes, norm):
     a = a[tuple(map(slice, in_s))]
     # Padding
     a = jnp.pad(a, [(0, x-y) for x, y in zip(in_s, a.shape)])
+  elif fft_type == xla_client.FftType.IRFFT:
+    s = [a.shape[axis] for axis in axes[:-1]]
+    if axes:
+      s += [max(0, 2 * (a.shape[axes[-1]] - 1))]
   else:
-    if fft_type == xla_client.FftType.IRFFT:
-      s = [a.shape[axis] for axis in axes[:-1]]
-      if axes:
-        s += [max(0, 2 * (a.shape[axes[-1]] - 1))]
-    else:
-      s = [a.shape[axis] for axis in axes]
+    s = [a.shape[axis] for axis in axes]
   transformed = lax.fft(a, fft_type, tuple(s)) * _fft_norm(jnp.array(s), func_name, norm)
 
   if orig_axes is not None:
@@ -114,7 +109,7 @@ def irfftn(a, s=None, axes=None, norm=None):
 
 
 def _axis_check_1d(func_name, axis):
-  full_name = "jax.numpy.fft." + func_name
+  full_name = f'jax.numpy.fft.{func_name}'
   if isinstance(axis, (list, tuple)):
     raise ValueError(
         "%s does not support multiple axes. Please use %sn. "
@@ -166,7 +161,7 @@ def ihfft(a, n=None, axis=-1, norm=None):
 
 
 def _fft_core_2d(func_name, fft_type, a, s, axes, norm):
-  full_name = "jax.numpy.fft." + func_name
+  full_name = f'jax.numpy.fft.{func_name}'
   if len(axes) != 2:
     raise ValueError(
         "%s only supports 2 axes. Got axes = %r."
@@ -211,14 +206,14 @@ def fftfreq(n, d=1.0):
   k = jnp.zeros(n)
   if n % 2 == 0:
     # k[0: n // 2 - 1] = jnp.arange(0, n // 2 - 1)
-    k = k.at[0: n // 2].set( jnp.arange(0, n // 2))
+    k = k.at[:n // 2].set(jnp.arange(0, n // 2))
 
     # k[n // 2:] = jnp.arange(-n // 2, -1)
     k = k.at[n // 2:].set( jnp.arange(-n // 2, 0))
 
   else:
     # k[0: (n - 1) // 2] = jnp.arange(0, (n - 1) // 2)
-    k = k.at[0: (n - 1) // 2 + 1].set(jnp.arange(0, (n - 1) // 2 + 1))
+    k = k.at[:(n - 1) // 2 + 1].set(jnp.arange(0, (n - 1) // 2 + 1))
 
     # k[(n - 1) // 2 + 1:] = jnp.arange(-(n - 1) // 2, -1)
     k = k.at[(n - 1) // 2 + 1:].set(jnp.arange(-(n - 1) // 2, 0))

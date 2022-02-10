@@ -74,8 +74,7 @@ class Config:
         raise Exception("Unrecognized config option: {}".format(name))
       self.values[name] = val
 
-    hook = self._update_hooks.get(name, None)
-    if hook:
+    if hook := self._update_hooks.get(name, None):
       hook(val)
 
   def read(self, name):
@@ -88,9 +87,8 @@ class Config:
   def _read(self, name):
     if self.use_absl:
       return getattr(self.absl_flags.FLAGS, name)
-    else:
-      self.check_exists(name)
-      return self.values[name]
+    self.check_exists(name)
+    return self.values[name]
 
   def add_option(self, name, default, opt_type, meta_args, meta_kwargs,
                  update_hook=None):

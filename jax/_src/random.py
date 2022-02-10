@@ -522,16 +522,15 @@ def normal(key: KeyArray,
 
 @partial(jit, static_argnums=(1, 2), inline=True)
 def _normal(key, shape, dtype) -> jnp.ndarray:
-  if dtypes.issubdtype(dtype, np.complexfloating):
-    sqrt2 = np.array(np.sqrt(2), dtype)
-
-    key_re, key_im = _split(key)
-    real_dtype = np.array(0, dtype).real.dtype
-    _re = _normal_real(key_re, shape, real_dtype)
-    _im = _normal_real(key_im, shape, real_dtype)
-    return (_re + 1j * _im) / sqrt2
-  else:
+  if not dtypes.issubdtype(dtype, np.complexfloating):
     return _normal_real(key, shape, dtype) # type: ignore
+  sqrt2 = np.array(np.sqrt(2), dtype)
+
+  key_re, key_im = _split(key)
+  real_dtype = np.array(0, dtype).real.dtype
+  _re = _normal_real(key_re, shape, real_dtype)
+  _im = _normal_real(key_im, shape, real_dtype)
+  return (_re + 1j * _im) / sqrt2
 
 @partial(jit, static_argnums=(1, 2), inline=True)
 def _normal_real(key, shape, dtype) -> jnp.ndarray:
@@ -582,10 +581,10 @@ def multivariate_normal(key: KeyArray,
 
 @partial(jit, static_argnums=(3, 4, 5), inline=True)
 def _multivariate_normal(key, mean, cov, shape, dtype, method) -> jnp.ndarray:
-  if not np.ndim(mean) >= 1:
+  if np.ndim(mean) < 1:
     msg = "multivariate_normal requires mean.ndim >= 1, got mean.ndim == {}"
     raise ValueError(msg.format(np.ndim(mean)))
-  if not np.ndim(cov) >= 2:
+  if np.ndim(cov) < 2:
     msg = "multivariate_normal requires cov.ndim >= 2, got cov.ndim == {}"
     raise ValueError(msg.format(np.ndim(cov)))
   n = mean.shape[-1]
@@ -820,7 +819,7 @@ def dirichlet(key: KeyArray,
 
 @partial(jit, static_argnums=(2, 3), inline=True)
 def _dirichlet(key, alpha, shape, dtype):
-  if not np.ndim(alpha) >= 1:
+  if np.ndim(alpha) < 1:
     msg = "dirichlet requires alpha.ndim >= 1, got alpha.ndim == {}"
     raise ValueError(msg.format(np.ndim(alpha)))
 
@@ -890,14 +889,16 @@ def _gamma_one(key: KeyArray, alpha):
 
   def _cond_fn(kXVU):
     _, X, V, U = kXVU
-    # TODO: use lax.cond when its batching rule is supported
-    # The reason is to avoid evaluating second condition which involves log+log
-    # if the first condition is satisfied
-    cond = lax.bitwise_and(lax.ge(U, lax.sub(one, lax.mul(squeeze_const, lax.mul(X, X)))),
-                           lax.ge(lax.log(U), lax.add(lax.mul(X, one_over_two),
-                                                      lax.mul(d, lax.add(lax.sub(one, V),
-                                                                         lax.log(V))))))
-    return cond
+    return lax.bitwise_and(
+        lax.ge(U, lax.sub(one, lax.mul(squeeze_const, lax.mul(X, X)))),
+        lax.ge(
+            lax.log(U),
+            lax.add(
+                lax.mul(X, one_over_two),
+                lax.mul(d, lax.add(lax.sub(one, V), lax.log(V))),
+            ),
+        ),
+    )
 
   def _body_fn(kXVU):
     def _next_kxv(kxv):
@@ -1129,10 +1130,7 @@ def poisson(key: KeyArray,
         '`poisson` is only implemented for the threefry2x32 RNG, '
         f'not {key.impl}')
   dtype = dtypes.canonicalize_dtype(dtype)
-  if shape is not None:
-    shape = core.canonicalize_shape(shape)
-  else:
-    shape = np.shape(lam)
+  shape = core.canonicalize_shape(shape) if shape is not None else np.shape(lam)
   lam = jnp.broadcast_to(lam, shape)
   lam = lax.convert_element_type(lam, np.float32)
   return _poisson(key, lam, shape, dtype)

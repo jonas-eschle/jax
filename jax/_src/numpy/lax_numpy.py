@@ -481,25 +481,23 @@ def _promote_shapes(fun_name, *args):
   """Apply NumPy-style broadcasting, making args shape-compatible for lax.py."""
   if len(args) < 2:
     return args
+  shapes = [shape(arg) for arg in args]
+  if _all(len(shapes[0]) == len(s) for s in shapes[1:]):
+    return args  # no need for rank promotion, so rely on lax promotion
+  nonscalar_ranks = {len(shp) for shp in shapes if shp}
+  if len(nonscalar_ranks) < 2:
+    return args
+  if config.jax_numpy_rank_promotion != "allow":
+    _rank_promotion_warning_or_error(fun_name, shapes)
+  if config.jax_dynamic_shapes:
+    # With dynamic shapes we don't support singleton-dimension broadcasting;
+    # we instead broadcast out to the full shape as a temporary workaround.
+    res_shape = lax.broadcast_shapes(*shapes)
+    return [broadcast_to(arg, res_shape) for arg, shp in zip(args, shapes)]
   else:
-    shapes = [shape(arg) for arg in args]
-    if _all(len(shapes[0]) == len(s) for s in shapes[1:]):
-      return args  # no need for rank promotion, so rely on lax promotion
-    nonscalar_ranks = {len(shp) for shp in shapes if shp}
-    if len(nonscalar_ranks) < 2:
-      return args
-    else:
-      if config.jax_numpy_rank_promotion != "allow":
-        _rank_promotion_warning_or_error(fun_name, shapes)
-      if config.jax_dynamic_shapes:
-        # With dynamic shapes we don't support singleton-dimension broadcasting;
-        # we instead broadcast out to the full shape as a temporary workaround.
-        res_shape = lax.broadcast_shapes(*shapes)
-        return [broadcast_to(arg, res_shape) for arg, shp in zip(args, shapes)]
-      else:
-        result_rank = len(lax.broadcast_shapes(*shapes))
-        return [broadcast_to(arg, (1,) * (result_rank - len(shp)) + shp)
-                for arg, shp in zip(args, shapes)]
+    result_rank = len(lax.broadcast_shapes(*shapes))
+    return [broadcast_to(arg, (1,) * (result_rank - len(shp)) + shp)
+            for arg, shp in zip(args, shapes)]
 
 
 def _rank_promotion_warning_or_error(fun_name, shapes):
@@ -518,13 +516,11 @@ def _rank_promotion_warning_or_error(fun_name, shapes):
 
 def _promote_dtypes(*args):
   """Convenience function to apply Numpy argument dtype promotion."""
-  # TODO(dougalm,mattjj): This is a performance bottleneck. Consider memoizing.
   if len(args) < 2:
     return args
-  else:
-    to_dtype, weak_type = dtypes._lattice_result_type(*args)
-    to_dtype = dtypes.canonicalize_dtype(to_dtype)
-    return [lax._convert_element_type(x, to_dtype, weak_type) for x in args]
+  to_dtype, weak_type = dtypes._lattice_result_type(*args)
+  to_dtype = dtypes.canonicalize_dtype(to_dtype)
+  return [lax._convert_element_type(x, to_dtype, weak_type) for x in args]
 
 def _promote_dtypes_inexact(*args):
   """Convenience function to apply Numpy argument dtype promotion.
@@ -626,11 +622,6 @@ def _convert_and_clip_integer(val, dtype):
     raise TypeError("_convert_and_clip_integer only accepts integer dtypes.")
 
   val_dtype = dtypes.canonicalize_dtype(val.dtype)
-  if val_dtype != val.dtype:
-    # TODO(jakevdp): this is a weird corner case; need to figure out how to handle it.
-    # This happens in X32 mode and can either come from a jax value created in another
-    # context, or a Python integer converted to int64.
-    pass
   min_val = _constant_like(val, _max(iinfo(dtype).min, iinfo(val_dtype).min))
   max_val = _constant_like(val, _min(iinfo(dtype).max, iinfo(val_dtype).max))
   return clip(val, min_val, max_val).astype(dtype)
@@ -1067,10 +1058,7 @@ def trapz(y, x=None, dx=1.0, axis: int = -1):
   _check_arraylike('trapz', y)
   y = moveaxis(y, axis, -1)
   if x is not None:
-    if ndim(x) == 1:
-      dx = diff(x)
-    else:
-      dx = moveaxis(diff(x, axis=axis), axis, -1)
+    dx = diff(x) if ndim(x) == 1 else moveaxis(diff(x, axis=axis), axis, -1)
   return 0.5 * (dx * (y[..., 1:] + y[..., :-1])).sum(-1)
 
 
@@ -1279,10 +1267,7 @@ def histogram(a, bins=10, range=None, weights=None, density=None):
   if weights is not None and a.shape != weights.shape:
     raise ValueError("weights should have the same shape as a.")
   a = ravel(a)
-  if weights is not None:
-    weights = ravel(weights)
-  else:
-    weights = ones_like(a)
+  weights = ravel(weights) if weights is not None else ones_like(a)
   bin_edges = histogram_bin_edges(a, bins, range, weights)
   bin_idx = searchsorted(bin_edges, a, side='right')
   bin_idx = where(a == bin_edges[-1], len(bin_edges) - 1, bin_idx)
@@ -1300,7 +1285,7 @@ def histogram2d(x, y, bins=10, range=None, weights=None, density=None):
   except TypeError:
     N = 1
 
-  if N != 1 and N != 2:
+  if N not in [1, 2]:
     x_edges = y_edges = asarray(bins)
     bins = [x_edges, y_edges]
 
@@ -1716,10 +1701,7 @@ def polyfit(x, y, deg, rcond=None, full=False, w=None, cov=False):
                             "to scale the covariance matrix")
       fac = resids / (len(x) - order)
       fac = fac[0] #making np.array() of shape (1,) to int
-    if y.ndim == 1:
-      return c, Vbase * fac
-    else:
-      return c, Vbase[:,:, newaxis] * fac
+    return (c, Vbase * fac) if y.ndim == 1 else (c, Vbase[:,:, newaxis] * fac)
   else:
     return c
 
@@ -1903,38 +1885,37 @@ def _moveaxis(a, source: Tuple[int, ...], destination: Tuple[int, ...]):
 def isclose(a, b, rtol=1e-05, atol=1e-08, equal_nan=False):
   a, b = _promote_args("isclose", a, b)
   dtype = _dtype(a)
-  if issubdtype(dtype, inexact):
-    if issubdtype(dtype, complexfloating):
-      dtype = _complex_elem_type(dtype)
-    rtol = lax.convert_element_type(rtol, dtype)
-    atol = lax.convert_element_type(atol, dtype)
-    out = lax.le(
-      lax.abs(lax.sub(a, b)),
-      lax.add(atol, lax.mul(rtol, lax.abs(b))))
-    # This corrects the comparisons for infinite and nan values
-    a_inf = isinf(a)
-    b_inf = isinf(b)
-    any_inf = logical_or(a_inf, b_inf)
-    both_inf = logical_and(a_inf, b_inf)
-    # Make all elements where either a or b are infinite to False
-    out = logical_and(out, logical_not(any_inf))
-    # Make all elements where both a or b are the same inf to True
-    same_value = lax.eq(a, b)
-    same_inf = logical_and(both_inf, same_value)
-    out = logical_or(out, same_inf)
-
-    # Make all elements where either a or b is NaN to False
-    a_nan = isnan(a)
-    b_nan = isnan(b)
-    any_nan = logical_or(a_nan, b_nan)
-    out = logical_and(out, logical_not(any_nan))
-    if equal_nan:
-      # Make all elements where both a and b is NaN to True
-      both_nan = logical_and(a_nan, b_nan)
-      out = logical_or(out, both_nan)
-    return out
-  else:
+  if not issubdtype(dtype, inexact):
     return lax.eq(a, b)
+  if issubdtype(dtype, complexfloating):
+    dtype = _complex_elem_type(dtype)
+  rtol = lax.convert_element_type(rtol, dtype)
+  atol = lax.convert_element_type(atol, dtype)
+  out = lax.le(
+    lax.abs(lax.sub(a, b)),
+    lax.add(atol, lax.mul(rtol, lax.abs(b))))
+  # This corrects the comparisons for infinite and nan values
+  a_inf = isinf(a)
+  b_inf = isinf(b)
+  any_inf = logical_or(a_inf, b_inf)
+  both_inf = logical_and(a_inf, b_inf)
+  # Make all elements where either a or b are infinite to False
+  out = logical_and(out, logical_not(any_inf))
+  # Make all elements where both a or b are the same inf to True
+  same_value = lax.eq(a, b)
+  same_inf = logical_and(both_inf, same_value)
+  out = logical_or(out, same_inf)
+
+  # Make all elements where either a or b is NaN to False
+  a_nan = isnan(a)
+  b_nan = isnan(b)
+  any_nan = logical_or(a_nan, b_nan)
+  out = logical_and(out, logical_not(any_nan))
+  if equal_nan:
+    # Make all elements where both a and b is NaN to True
+    both_nan = logical_and(a_nan, b_nan)
+    out = logical_or(out, both_nan)
+  return out
 
 
 @_wraps(np.interp)
@@ -2011,12 +1992,11 @@ def setdiff1d(ar1, ar2, assume_unique=False, *, size=None, fill_value=None):
   mask = in1d(ar1, ar2, invert=True)
   if size is None:
     return ar1[mask]
-  else:
-    if not (assume_unique or size is None):
-      # Set mask to zero at locations corresponding to unique() padding.
-      n_unique = ar1.size + 1 - (ar1 == ar1[0]).sum()
-      mask = where(arange(ar1.size) < n_unique, mask, False)
-    return where(arange(size) < mask.sum(), ar1[where(mask, size=size)], fill_value)
+  if not assume_unique:
+    # Set mask to zero at locations corresponding to unique() padding.
+    n_unique = ar1.size + 1 - (ar1 == ar1[0]).sum()
+    mask = where(arange(ar1.size) < n_unique, mask, False)
+  return where(arange(size) < mask.sum(), ar1[where(mask, size=size)], fill_value)
 
 
 _UNION1D_DOC = """\
@@ -2076,10 +2056,7 @@ def _intersect1d_sorted_mask(ar1, ar2, return_indices=False):
     aux = sort(ar)
 
   mask = aux[1:] == aux[:-1]
-  if return_indices:
-    return aux, mask, indices
-  else:
-    return aux, mask
+  return (aux, mask, indices) if return_indices else (aux, mask)
 
 
 @_wraps(np.intersect1d)
@@ -2088,17 +2065,16 @@ def intersect1d(ar1, ar2, assume_unique=False, return_indices=False):
   ar1 = core.concrete_or_error(None, ar1, "The error arose in intersect1d()")
   ar2 = core.concrete_or_error(None, ar2, "The error arose in intersect1d()")
 
-  if not assume_unique:
-    if return_indices:
-      ar1, ind1 = unique(ar1, return_index=True)
-      ar2, ind2 = unique(ar2, return_index=True)
-    else:
-      ar1 = unique(ar1)
-      ar2 = unique(ar2)
-  else:
+  if assume_unique:
     ar1 = ravel(ar1)
     ar2 = ravel(ar2)
 
+  elif return_indices:
+    ar1, ind1 = unique(ar1, return_index=True)
+    ar2, ind2 = unique(ar2, return_index=True)
+  else:
+    ar1 = unique(ar1)
+    ar2 = unique(ar2)
   if return_indices:
     aux, mask, aux_sort_indices = _intersect1d_sorted_mask(ar1, ar2, return_indices)
   else:
@@ -2106,16 +2082,15 @@ def intersect1d(ar1, ar2, assume_unique=False, return_indices=False):
 
   int1d = aux[:-1][mask]
 
-  if return_indices:
-    ar1_indices = aux_sort_indices[:-1][mask]
-    ar2_indices = aux_sort_indices[1:][mask] - ar1.size
-    if not assume_unique:
-      ar1_indices = ind1[ar1_indices]
-      ar2_indices = ind2[ar2_indices]
-
-    return int1d, ar1_indices, ar2_indices
-  else:
+  if not return_indices:
     return int1d
+  ar1_indices = aux_sort_indices[:-1][mask]
+  ar2_indices = aux_sort_indices[1:][mask] - ar1.size
+  if not assume_unique:
+    ar1_indices = ind1[ar1_indices]
+    ar2_indices = ind2[ar2_indices]
+
+  return int1d, ar1_indices, ar2_indices
 
 
 @_wraps(np.isin, lax_description="""
@@ -2245,19 +2220,18 @@ def broadcast_to(arr, shape):
   arr_shape = _shape(arr)
   if core.symbolic_equal_shape(arr_shape, shape):
     return arr
-  else:
-    nlead = len(shape) - len(arr_shape)
-    shape_tail = shape[nlead:]
-    compatible = _all(core.symbolic_equal_one_of_dim(arr_d, [1, shape_d])
-                      for arr_d, shape_d in safe_zip(arr_shape, shape_tail))
-    if nlead < 0 or not compatible:
-      msg = "Incompatible shapes for broadcasting: {} and requested shape {}"
-      raise ValueError(msg.format(arr_shape, shape))
-    diff, = np.where(tuple(not core.symbolic_equal_dim(arr_d, shape_d)
-                           for arr_d, shape_d in safe_zip(arr_shape, shape_tail)))
-    new_dims = tuple(range(nlead)) + tuple(nlead + diff)
-    kept_dims = tuple(np.delete(np.arange(len(shape)), new_dims))
-    return lax.broadcast_in_dim(squeeze(arr, tuple(diff)), shape, kept_dims)
+  nlead = len(shape) - len(arr_shape)
+  shape_tail = shape[nlead:]
+  compatible = _all(core.symbolic_equal_one_of_dim(arr_d, [1, shape_d])
+                    for arr_d, shape_d in safe_zip(arr_shape, shape_tail))
+  if nlead < 0 or not compatible:
+    msg = "Incompatible shapes for broadcasting: {} and requested shape {}"
+    raise ValueError(msg.format(arr_shape, shape))
+  diff, = np.where(tuple(not core.symbolic_equal_dim(arr_d, shape_d)
+                         for arr_d, shape_d in safe_zip(arr_shape, shape_tail)))
+  new_dims = tuple(range(nlead)) + tuple(nlead + diff)
+  kept_dims = tuple(np.delete(np.arange(len(shape)), new_dims))
+  return lax.broadcast_in_dim(squeeze(arr, tuple(diff)), shape, kept_dims)
 
 
 def _split(op, ary, indices_or_sections, axis=0):

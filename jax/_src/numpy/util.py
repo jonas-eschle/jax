@@ -56,16 +56,14 @@ def _parse_numpydoc(docstr: Optional[str]) -> ParsedDoc:
     lambda match: f"{match.groups()[0]}", docstr)
 
   signature, body = "", docstr
-  match = _numpy_signature_re.match(body)
-  if match:
+  if match := _numpy_signature_re.match(body):
     signature = match.group()
     body = docstr[match.end():]
 
   firstline, _, body = body.partition('\n')
   body = textwrap.dedent(body.lstrip('\n'))
 
-  match = _numpy_signature_re.match(body)
-  if match:
+  if match := _numpy_signature_re.match(body):
     signature = match.group()
     body = body[match.end():]
 
@@ -148,9 +146,9 @@ def _wraps(fun: Optional[Callable], update_doc: bool = True, lax_description: st
 
         if parsed.front_matter:
           docstr += "\n" + parsed.front_matter.strip() + "\n"
-        kept_sections = (content.strip() for section, content in parsed.sections.items()
-                         if section in sections)
-        if kept_sections:
+        if kept_sections := (content.strip()
+                             for section, content in parsed.sections.items()
+                             if section in sections):
           docstr += "\n" + "\n\n".join(kept_sections) + "\n"
       except:
         if config.jax_enable_checks:

@@ -67,19 +67,17 @@ class Error:
   def get(self) -> Optional[str]:
     """Returns error message is error happened, None if no error happened."""
     assert np.shape(self.err) == np.shape(self.code)
-    if np.size(self.err) == 1:
-      if self.err:
-        return self.msgs[int(self.code)]
-    else:
+    if np.size(self.err) != 1:
       return '\n'.join(f'at mapped index {", ".join(map(str, idx))}: '  # type: ignore
                        f'{self.msgs[int(self.code[idx])]}'              # type: ignore
                        for idx, e in np.ndenumerate(self.err) if e) or None
+    if self.err:
+      return self.msgs[int(self.code)]
     return None
 
   def throw(self):
     """Throw ValueError with error message if error happened."""
-    err = self.get()
-    if err:
+    if err := self.get():
       raise ValueError(err)
 
 register_pytree_node(Error,
@@ -122,8 +120,7 @@ class CheckifyTrace(core.Trace):
 
   def process_primitive(self, primitive, tracers, params):
     in_vals = [t.val for t in tracers]
-    rule = error_checks.get(primitive)
-    if rule:
+    if rule := error_checks.get(primitive):
       out, self.main.error = rule(self.main.error, self.main.enabled_errors,  # type: ignore
                                   *in_vals, **params)
     else:

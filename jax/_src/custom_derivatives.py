@@ -73,10 +73,7 @@ def _zeros_like_pytree(x):
 
 @partial(partial, tree_map)
 def _stop_gradient(x):
-  if isinstance(x, core.Tracer):
-    return stop_gradient_p.bind(x)
-  else:
-    return x
+  return stop_gradient_p.bind(x) if isinstance(x, core.Tracer) else x
 
 
 ### JVPs
@@ -231,7 +228,7 @@ def _add_args(f, extra_args):
 
 @lu.transformation
 def _add_args_(extra_args, *args, **kwargs):
-  extra_args = tuple([arg.val for arg in extra_args])
+  extra_args = tuple(arg.val for arg in extra_args)
   all_args = (extra_args + args)
   yield (yield all_args, kwargs)
 
@@ -301,9 +298,10 @@ def process_env_traces(primitive, level: int, jvp_was_run: bool, *args):
   outs = yield args, {}
   todo = []
   while True:
-    tracers = [x for x in outs if isinstance(x, core.Tracer)
-               and (level is None or x._trace.level > level)]
-    if tracers:
+    if tracers := [
+        x for x in outs if isinstance(x, core.Tracer) and (
+            level is None or x._trace.level > level)
+    ]:
       ans = max(tracers, key=lambda x: x._trace.level)
     else:
       break
@@ -641,12 +639,10 @@ class CustomVJPCallPrimitive(core.CallPrimitive):
     outs = top_trace.process_custom_vjp_call(self, fun, fwd, bwd_, tracers,
                                              out_trees=out_trees)
     fst, env_trace_todo = lu.merge_linear_aux(env_trace_todo1, env_trace_todo2)
-    if fst:
-      return _apply_todos(env_trace_todo, map(core.full_lower, outs))
-    else:
+    if not fst:
       env_trace_todo, bwd_transform = env_trace_todo
       bwd = _apply_bwd_transform(bwd_transform, bwd)
-      return _apply_todos(env_trace_todo, map(core.full_lower, outs))
+    return _apply_todos(env_trace_todo, map(core.full_lower, outs))
 
   def impl(self, fun, fwd, bwd, *args, out_trees):
     del fwd, bwd, out_trees
@@ -663,9 +659,10 @@ def process_env_traces_fwd(level: int, out_trees, *args):
   todo = []
   bwd_transforms = []
   while True:
-    tracers = [x for x in outs if isinstance(x, core.Tracer)
-               and (level is None or x._trace.level > level)]
-    if tracers:
+    if tracers := [
+        x for x in outs if isinstance(x, core.Tracer) and (
+            level is None or x._trace.level > level)
+    ]:
       ans = max(tracers, key=lambda x: x._trace.level)
     else:
       break

@@ -440,15 +440,13 @@ def _cpp_jit(
     # outputs that could be tracers (if f is capturing `Tracer` by closure).
     execute: Optional[functools.partial] = (
         dispatch._xla_callable.most_recent_entry())
-    use_fastpath = (
+    if use_fastpath := (
         # This is if we have already executed this code-path (most-recent entry
         # has been reset to None). Thus, we do not support the fast-path.
-        execute is not None and
-        execute.func is dispatch._execute_compiled and  # not trivial, not pmap
+        execute is not None and execute.func is dispatch._execute_compiled
+        and  # not trivial, not pmap
         # Not supported: ShardedDeviceArray
-        all(device_array.type_is_device_array(x) for x in out_flat))
-    ### If we can use the fastpath, we return required info to the caller.
-    if use_fastpath:
+        all(device_array.type_is_device_array(x) for x in out_flat)):
       _, xla_executable, _, result_handlers, kept_var_idx = execute.args
       sticky_device = None
       avals = []
@@ -600,22 +598,13 @@ class Compiled:
     try:
       out_flat = self._executable.call(*args_flat)
     except TypeError as e:
-      # We can't transform ahead-of-time compiled calls, since we've
-      # lowered and compiled for a fixed function signature, and JAX
-      # transformations change signatures. We interpret a Tracer
-      # argument as an indication of a transformation attempt. We
-      # could check this before the executable call, but we'd rather
-      # avoid isinstance checks on the call path. Seeing a TypeError
-      # might mean that arguments have JAX-invalid types, which in
-      # turn might mean some are Tracers.
       for arg in args_flat:
         if isinstance(arg, core.Tracer):
           raise TypeError(
               'Cannot apply JAX transformations to a function lowered and '
               'compiled for a particular signature. Detected argument of '
               f'Tracer type {type(arg)}.')
-      else:
-        raise
+      raise
     return tree_unflatten(self.out_tree, out_flat)
 
 
@@ -850,10 +839,9 @@ def xla_computation(fun: Callable,
   def make_axis_env(nreps):
     if axis_env is None:
       return xla.AxisEnv(nreps, (), ())
-    else:
-      nreps = nreps * prod(size for name, size in axis_env)
-      names, sizes = unzip2(axis_env)
-      return xla.AxisEnv(nreps, names, sizes)
+    nreps = nreps * prod(size for name, size in axis_env)
+    names, sizes = unzip2(axis_env)
+    return xla.AxisEnv(nreps, names, sizes)
 
   @wraps(fun)
   @api_boundary
@@ -923,10 +911,7 @@ def xla_computation(fun: Callable,
                            "to get a ShapedArray, otherwise this "
                            "information is lost")
 
-    if return_shape:
-      return built, out_shape
-    else:
-      return built
+    return (built, out_shape) if return_shape else built
 
   return computation_maker
 
@@ -1074,10 +1059,7 @@ def value_and_grad(fun: Callable, argnums: Union[int, Sequence[int]] = 0,
     tree_map(partial(_check_output_dtype_grad, holomorphic), ans)
     g = vjp_py(jax.lax._one(ans))
     g = g[0] if isinstance(argnums, int) else g
-    if not has_aux:
-      return ans, g
-    else:
-      return (ans, aux), g
+    return (ans, g) if not has_aux else ((ans, aux), g)
 
   return value_and_grad_f
 
@@ -1088,19 +1070,17 @@ def _check_scalar(x):
   except TypeError as e:
     raise TypeError(msg(f"was {x}")) from e
   else:
-    if isinstance(aval, ShapedArray):
-      if aval.shape != ():
-        raise TypeError(msg(f"had shape: {aval.shape}"))
-    else:
+    if not isinstance(aval, ShapedArray):
       raise TypeError(msg(f"had abstract value {aval}"))
+    if aval.shape != ():
+      raise TypeError(msg(f"had shape: {aval.shape}"))
 
 def _check_input_dtype_revderiv(name, holomorphic, allow_int, x):
   _check_arg(x)
   aval = core.get_aval(x)
-  if holomorphic:
-    if not dtypes.issubdtype(aval.dtype, np.complexfloating):
-      raise TypeError(f"{name} with holomorphic=True requires inputs with complex dtype, "
-                      f"but got {aval.dtype.name}.")
+  if holomorphic and not dtypes.issubdtype(aval.dtype, np.complexfloating):
+    raise TypeError(f"{name} with holomorphic=True requires inputs with complex dtype, "
+                    f"but got {aval.dtype.name}.")
   if (dtypes.issubdtype(aval.dtype, np.integer) or
       dtypes.issubdtype(aval.dtype, np.bool_)):
     if not allow_int:
@@ -1182,10 +1162,7 @@ def jacfwd(fun: Callable, argnums: Union[int, Sequence[int]] = 0,
     tree_map(partial(_check_output_dtype_jacfwd, holomorphic), y)
     example_args = dyn_args[0] if isinstance(argnums, int) else dyn_args
     jac_tree = tree_map(partial(_jacfwd_unravel, example_args), y, jac)
-    if not has_aux:
-      return jac_tree
-    else:
-      return jac_tree, aux
+    return jac_tree if not has_aux else (jac_tree, aux)
 
   return jacfun
 
@@ -1205,10 +1182,9 @@ def _check_input_dtype_jacfwd(holomorphic: bool, x: Any) -> None:
 
 def _check_output_dtype_jacfwd(holomorphic, x):
   aval = core.get_aval(x)
-  if holomorphic:
-    if not dtypes.issubdtype(aval.dtype, np.complexfloating):
-      raise TypeError("jacfwd with holomorphic=True requires outputs with complex dtype, "
-                      f"but got {aval.dtype.name}.")
+  if holomorphic and not dtypes.issubdtype(aval.dtype, np.complexfloating):
+    raise TypeError("jacfwd with holomorphic=True requires outputs with complex dtype, "
+                    f"but got {aval.dtype.name}.")
 
 def jacrev(fun: Callable, argnums: Union[int, Sequence[int]] = 0,
            has_aux: bool = False, holomorphic: bool = False, allow_int: bool = False) -> Callable:
@@ -1262,10 +1238,7 @@ def jacrev(fun: Callable, argnums: Union[int, Sequence[int]] = 0,
     example_args = dyn_args[0] if isinstance(argnums, int) else dyn_args
     jac_tree = tree_map(partial(_jacrev_unravel, y), example_args, jac)
     jac_tree = tree_transpose(tree_structure(example_args), tree_structure(y), jac_tree)
-    if not has_aux:
-      return jac_tree
-    else:
-      return jac_tree, aux
+    return jac_tree if not has_aux else (jac_tree, aux)
 
   return jacfun
 jacobian = jacrev
@@ -1843,11 +1816,7 @@ def pmap(
   >>> print(f2(jnp.array([2., 3.])))  # doctest: +SKIP
   [ 13.  13.]
   """
-  if FLAGS.experimental_cpp_pmap:
-    func = _cpp_pmap
-  else:
-    func = _python_pmap
-
+  func = _cpp_pmap if FLAGS.experimental_cpp_pmap else _python_pmap
   return func(
       fun,
       axis_name,
@@ -1995,7 +1964,7 @@ def _shared_code_pmap(fun, axis_name, static_broadcasted_argnums,
   if not all(type(l) is int for l in tree_leaves(in_axes)):
     raise TypeError("pmap in_axes must be an int, None, or (nested) container "
                     f"with those types as leaves, but got {in_axes}.")
-  if not all(type(l) is int for l in tree_leaves(out_axes)):
+  if any(type(l) is not int for l in tree_leaves(out_axes)):
     raise TypeError("pmap out_axes must be an int, None, or (nested) container "
                     f"with those types as leaves, but got {out_axes}.")
 
@@ -2100,16 +2069,14 @@ def _cpp_pmap(
     ### Decide whether we can support the C++ fast path
     execute: Optional[functools.partial] = None
     execute = pxla.parallel_callable.most_recent_entry()
-    use_fastpath = (
+    if use_fastpath := (
         execute is not None and
         # We don't support JAX extension backends. In particular, some
         # extentions do not return a partial with a `func` attribute.
         getattr(execute[0], "func", None) is pxla.execute_replicated and
         # No tracers in the outputs. Checking for ShardedDeviceArray should be
         # sufficient, but we use the more general `DeviceArray`.
-        all(isinstance(x, device_array.DeviceArray) for x in out_flat))
-    ### If we can use the fastpath, we return required info to the caller.
-    if use_fastpath:
+        all(isinstance(x, device_array.DeviceArray) for x in out_flat)):
       xla_executable, backend_, in_handler, out_handler = execute[0].args
       fastpath_data = _PmapFastpathData(
           version=1,

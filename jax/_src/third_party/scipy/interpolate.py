@@ -25,10 +25,7 @@ def _ndim_coords_from_arrays(points, ndim=None):
     _check_arraylike("_ndim_coords_from_arrays", points)
     points = asarray(points)  # SciPy: asanyarray(points)
     if points.ndim == 1:
-      if ndim is None:
-        points = points.reshape(-1, 1)
-      else:
-        points = points.reshape(-1, ndim)
+      points = points.reshape(-1, 1) if ndim is None else points.reshape(-1, ndim)
   return points
 
 
